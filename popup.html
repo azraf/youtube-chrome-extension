@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Personal YouTube</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body class="popup">
+  <h1>Personal YouTube</h1>
+  <p id="what" class="muted">Not a YouTube video or playlist.</p>
+  <div id="video-actions" hidden>
+    <button data-kind="audio">Download audio</button>
+    <button data-kind="video">Download video</button>
+    <button data-kind="none" class="secondary">Add to library…</button>
+  </div>
+  <div id="playlist-actions" hidden>
+    <button data-kind="none">Import playlist…</button>
+  </div>
+  <button id="open" class="secondary">Open library</button>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

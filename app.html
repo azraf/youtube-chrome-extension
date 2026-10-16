@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Personal YouTube</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <strong>Personal YouTube</strong>
+    <nav>
+      <a href="#library">Library</a>
+      <a href="#now">Player</a>
+      <a href="#downloads">Downloads</a>
+      <a href="#search">Search</a>
+      <a href="#settings">Settings</a>
+    </nav>
+  </header>
+
+  <section id="paste" class="card">
+    <form data-submit="paste">
+      <label for="add-input" class="sr-only">YouTube links</label>
+      <textarea id="add-input" name="text" rows="3" placeholder="Paste YouTube links — videos, shorts or a playlist.&#10;Optional: first line without a link = playlist name; “Label: link” tags that video."></textarea>
+      <div class="row">
+        <button type="submit">Add</button>
+        <button type="button" class="secondary" data-act="pastePlay">Add &amp; play</button>
+      </div>
+    </form>
+  </section>
+
+  <main id="view"></main>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Player (route #now) — the app's now_playing_screen + video pane. -->
+  <section id="now" hidden aria-label="Player">
+    <div class="now-head">
+      <button class="icon" data-act="closeNow" title="Back" aria-label="Back">←</button>
+      <h2>Player</h2>
+      <div class="seg" role="group" aria-label="Show">
+        <button id="n-video" data-act="nVideo" aria-pressed="true">Video</button><button id="n-audio" data-act="nAudio" aria-pressed="false">Audio</button>
+      </div>
+      <span class="grow"></span>
+      <button class="chip" data-act="pQueue" title="Show the queue">Queue</button>
+      <button class="icon" data-act="nAdd" title="Add to library…" aria-label="Add to library">＋</button>
+      <button class="icon" data-act="nDlAudio" title="Download audio" aria-label="Download audio">♪</button>
+      <button class="icon" data-act="nDlVideo" title="Download video" aria-label="Download video">⬇</button>
+    </div>
+    <p class="now-empty muted">Nothing playing. Press ▶ on any video in your <a href="#library">Library</a>, a playlist, <a href="#downloads">Downloads</a> or <a href="#search">Search</a>.</p>
+    <div id="stage">
+      <video id="media" playsinline></video>
+      <img id="n-art" alt="" hidden>
+      <button class="icon fs" data-act="nFullscreen" title="Fullscreen" aria-label="Fullscreen">⛶</button>
+      <div class="stage-chips">
+        <button id="n-live" class="chip" data-act="nLive" aria-pressed="false" title="Play the YouTube stream instead of the downloaded file" hidden>Play live stream</button>
+        <button id="n-quality" class="chip" data-act="nQuality" title="Streaming quality — tap to switch" hidden>360p</button>
+        <select id="n-track" data-change="nTrack" title="Audio track" aria-label="Audio track" hidden></select>
+      </div>
+    </div>
+    <div class="now-meta">
+      <div id="n-title" class="title2"></div>
+      <div id="n-sub" class="muted"></div>
+      <div id="n-error" class="error" hidden>
+        <span id="n-error-text"></span>
+        <button class="secondary" data-act="nRetry">Retry</button>
+        <button class="secondary" data-act="nTry360">Try 360p</button>
+      </div>
+    </div>
+    <div class="seekrow">
+      <span id="n-pos" class="muted">0:00</span>
+      <input id="n-seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
+      <span id="n-dur" class="muted">0:00</span>
+    </div>
+    <div class="pctl big">
+      <button class="icon" data-act="pPrev" title="Previous (restarts after 5 s)" aria-label="Previous">⏮</button>
+      <button class="icon" data-act="pBack" title="Back 10 s" aria-label="Back 10 seconds">↺ 10</button>
+      <button class="play" id="n-toggle" data-act="pToggle" title="Play / pause" aria-label="Play or pause">▶</button>
+      <button class="icon" data-act="pFwd" title="Forward 10 s" aria-label="Forward 10 seconds">10 ↻</button>
+      <button class="icon" data-act="pNext" title="Next" aria-label="Next">⏭</button>
+    </div>
+    <div class="pctl">
+      <button class="chip" data-act="pShuffle" title="Shuffle the rest of the queue">Shuffle</button>
+      <button id="n-repeat" class="chip" data-act="pRepeat" title="Repeat">Repeat: off</button>
+      <button id="n-speed" class="chip" data-act="pSpeed" title="Playback speed">1×</button>
+      <select id="n-sleep" data-change="pSleep" title="Sleep timer" aria-label="Sleep timer"></select>
+    </div>
+    <ol id="queue" hidden></ol>
+  </section>
+
+  <!-- Mini player: tap to open the player. -->
+  <footer id="mini" hidden>
+    <div id="m-bar"><div id="m-fill"></div></div>
+    <div class="mini-row">
+      <img id="m-art" alt="" data-act="openNow">
+      <div class="meta" data-act="openNow" role="button" tabindex="0" title="Open the player">
+        <div id="m-title" class="title"></div>
+        <div id="m-sub" class="muted"></div>
+      </div>
+      <button class="icon" data-act="pPrev" title="Previous" aria-label="Previous">⏮</button>
+      <button class="icon" id="m-toggle" data-act="pToggle" title="Play / pause" aria-label="Play or pause">▶</button>
+      <button class="icon" data-act="pNext" title="Next" aria-label="Next">⏭</button>
+      <button class="icon" data-act="openNow" title="Open the player" aria-label="Open the player">⌃</button>
+    </div>
+  </footer>
+
+  <dialog id="dlg"></dialog>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
