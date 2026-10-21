@@ -12,7 +12,19 @@ For personal use only. It isn't on the Chrome Web Store.
 4. Click **Load unpacked** and choose the unzipped folder (the one with `manifest.json` in it).
 5. Pin **Personal YouTube** to the toolbar from the puzzle-piece menu.
 
-To update later: replace the folder with the new version (or `git pull`), then click the ↻ reload icon on the extension's card in `chrome://extensions`.
+## Updating
+
+The extension checks GitHub once a day and tells you when a new version is out. You can also check yourself in **Settings › Updates**. Your library, settings and downloaded files stay with every update. Chrome keeps them under the extension's ID (`lfchnfidjdegnhgajhmbmmjmpdoibmhi`, fixed by the `key` in `manifest.json`), not under the folder.
+
+1. **Download the ZIP** (the link in Settings › Updates, or **Code › Download ZIP**) and unzip it.
+2. Do one of these:
+   - Copy its files over your current extension folder, replacing them, then press **Reload extension** in Settings › Updates (or ↻ on its card in `chrome://extensions`).
+   - Keep the new folder anywhere, then in `chrome://extensions` click **Load unpacked** and choose it. It takes the place of the old copy.
+3. **Never click Remove** on the extension's card: removing it deletes its library and downloads.
+
+Installed with git? Run `git pull` in its folder, then Reload.
+
+**Coming from version 0.2 or older:** those versions had no fixed ID, so version 0.3 starts with an empty library once. Connect web sync in Settings to bring your playlists, tags and descriptions back; downloads need downloading again. You can remove the old copy afterwards. From 0.3 on, updates keep everything.
 
 ## Getting started
 
@@ -114,6 +126,7 @@ Search YouTube from inside the app. Results can be played, added (＋) or downlo
   - *High*: streams up to 1080p and downloads the best quality that fits a 1 GB merge. Long videos get a lower resolution. High downloads are merged inside the browser, so they take longer.
 - **Audio language**: the preferred dubbed track for streaming and playlist downloads.
 - **Auto-remove downloads** after a number of days. A per-download *Remove after…* overrides this.
+- **Updates**: the installed version, **Check for updates**, the steps to update without losing anything, and **Reload extension**.
 - **Storage**: shows space used. **Clear storage…** removes leftovers from failed downloads and can also remove all your downloads.
 - **Web sync**: keeps playlists, tags and categories in step with the Personal Youtube phone app through app.makewebsmart.com. Files are never uploaded. To connect:
   1. On the website, go to **Settings › Devices › Generate PIN** for Personal Youtube.

@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Personal YouTube",
-  "version": "0.2.0",
+  "version": "0.3.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx6mFW0K8BDa8cr7L+hObc0EP1Y12hTEXTzdHJgQ2qc4ae+XTsnR96W06YKgFuh0ygOgEyaPg9PmiRA8Y1MkY/dBqFd5+o6IfAyv1VCqN20iQAzM+nctXwEe+zp+dsI3jZDrfgPhVJnnwPZalTkEPpqXOC1NSL52zHXt4/QCvcCvh1gCJkD0K2xndholvumM3vg6MKPPakPnQnXtrgV5hIV0X+I4Z2RAt5W7S5FmNzg2YjXQ2DB6JAStvdhZMfc2fbpLw3BX0iWHezhv77UVHVEUp3sGybDsS7uljlfA6J64mj79Lay1TE+QZOo1gy/IIrxyD+G7DW16iAyBSskVWQwIDAQAB",
   "description": "Download YouTube videos, shorts and playlists, organise them, play them offline.",
   "minimum_chrome_version": "121",
   "action": { "default_popup": "popup.html", "default_title": "Personal YouTube" },

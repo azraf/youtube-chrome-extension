@@ -9,6 +9,7 @@ import * as sync from './sync.js';
 import { extractVideoId, extractPlaylistId, isPlaylistUrl, parseInput, extractUrls } from './parse.js';
 import { isClip, sourceOf, descriptionFor } from './clip.js';
 import { openEditor } from './editor.js';
+import * as upd from './update.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -291,7 +292,10 @@ async function library() {
   const [added, played, pls, counts, tags, cats] = await Promise.all([
     db.recentlyAdded(), db.recentlyPlayed(), db.playlistsFiltered(plFilter), db.playlistCounts(), db.tags(), db.categories()]);
   if (!added.length) {
-    return '<section class="card"><h2>Welcome</h2><p class="muted">Paste a YouTube video, shorts or playlist link above, or use the toolbar button on a YouTube page.</p></section>';
+    return `<section class="card"><h2>Welcome</h2><p class="muted">Paste a YouTube video, shorts or playlist link above, or use the toolbar button on a YouTube page.</p>
+      <p class="muted">Coming from version 0.2 or older? This version has a fixed ID, so it starts with an empty library once.
+        <a href="#settings">Connect web sync</a> to bring your playlists back; downloads need downloading again.
+        From now on, updates keep everything.</p></section>`;
   }
   return `
     <section class="card"><h2>Recently added</h2>${videoRows('added', added)}</section>
@@ -408,6 +412,36 @@ async function searchView() {
       ${searchState.token ? '<div class="row"><button class="secondary" data-act="searchMore">More results</button></div>' : ''}</section>` : ''}`;
 }
 
+/** Settings › Updates: what's installed, what's on GitHub, and how to update safely. */
+const updateState = { latest: null, checked: false, error: null };
+function updatesCard() {
+  const u = updateState;
+  return `<section class="card" id="updates"><h2>Updates</h2>
+    <p>Version ${esc(upd.currentVersion())}${u.latest ? ` · <strong>version ${esc(u.latest)} is available</strong>` : u.checked ? ' · you have the latest version' : ''}</p>
+    ${u.error ? `<p class="error">${esc(u.error)}</p>` : ''}
+    ${u.latest ? `<ol>
+      <li><a href="${upd.ZIP_URL}" download>Download the ZIP</a> and unzip it.</li>
+      <li>Copy its files over this extension's folder (replace them), or keep the new folder anywhere.</li>
+      <li>In <a href="#" data-act="openExtensions">chrome://extensions</a>, <strong>don't click Remove</strong>: that deletes your library and downloads.
+        Replaced the files? Press <b>Reload extension</b> below. New folder? Click <b>Load unpacked</b> and choose it.</li>
+    </ol>` : ''}
+    <div class="row"><button data-act="checkUpdate">Check for updates</button><button class="secondary" data-act="reloadExtension">Reload extension</button></div>
+    <p class="muted">Your library, settings and downloads stay with every update. Installed with git? Run <code>git pull</code> in its folder, then Reload.</p>
+  </section>`;
+}
+
+/** Once a day on start: a quiet check; a newer version gets a toast. */
+async function autoCheckUpdate() {
+  const last = +(await db.getSetting('updateCheckedAt')) || 0;
+  if (Date.now() - last < 86400000) return;
+  await db.setSetting('updateCheckedAt', Date.now());
+  try {
+    updateState.latest = await upd.check();
+    updateState.checked = true;
+  } catch { return; } // offline: Settings › Updates can try again
+  if (updateState.latest) toast(`Version ${updateState.latest} is available — see Settings › Updates`);
+}
+
 async function settingsView() {
   const [lang, quality, autoOn, autoDays, used, est, token, email, lastAt, lastErr] = await Promise.all([
     db.getSetting('audioLanguage'), db.getSetting('videoQualityMode'), db.getSetting('autoRemoveEnabled'), db.getSetting('autoRemoveDays'), db.storageUsed(),
@@ -430,6 +464,7 @@ async function settingsView() {
       <input type="number" min="1" max="365" value="${esc(autoDays ?? 30)}" data-change="autoDays" aria-label="Days" style="width:5rem"> days.
       <p class="muted">A per-download “Remove after…” on the Downloads page always wins.</p>
     </section>
+    ${updatesCard()}
     <section class="card"><h2>Storage</h2>
       <p>${used.count} downloads · ${fmtBytes(used.bytes)} <span class="muted">(this extension uses ${fmtBytes(est.usage ?? 0)} in all; browser quota ${fmtBytes(est.quota ?? 0)})</span></p>
       <button class="secondary" data-act="clearStorage">Clear storage…</button>
@@ -588,6 +623,18 @@ const ACT = {
     toast(files ? `Freed ${fmtBytes(bytes)} (${files} file${files > 1 ? 's' : ''})` : 'Nothing to clear');
     render();
   },
+  checkUpdate: async () => {
+    updateState.error = null;
+    try {
+      updateState.latest = await upd.check();
+      updateState.checked = true;
+    } catch (e) {
+      updateState.error = e.message;
+    }
+    render();
+  },
+  reloadExtension: () => chrome.runtime.reload(),
+  openExtensions: () => chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` }),
   syncNow: async () => { toast('Syncing…'); await sync.sync({ manual: true, fetchMeta: yt.fetchMeta }); toast((await db.getSetting('syncLastError')) ?? 'Synced'); },
   disconnect: async () => { if (confirm('Disconnect web sync? Your library stays on this computer.')) await sync.disconnect(); },
   // player (mini player + Now playing)
@@ -840,4 +887,5 @@ chrome.tabs.getCurrent((t) => t && chrome.tabs.update(t.id, { autoDiscardable: f
 await dl.init();
 await render();
 dl.sweep().catch(console.info);
+autoCheckUpdate().catch(console.info);
 sync.sync({ fetchMeta: yt.fetchMeta });

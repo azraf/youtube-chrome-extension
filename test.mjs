@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { extractVideoId, extractPlaylistId, isPlaylistUrl, parseInput } from './parse.js';
 import * as clip from './clip.js';
+import { isNewer } from './update.js';
 import { pickStreams, videoUrlUpTo, playlistPage, searchPage, audioFor, trackFor, videoFor, dashManifest } from './yt.js';
 
 // ---- extractVideoId ----
@@ -334,5 +335,13 @@ await assert.rejects(fetchRanges({
   assert.ok(!ffmpegPlan([[1000, 2000]], { input: 'a.mp4', output: 'b.mp4', ext: 'mp4', video: true, tmp }).runs[0].includes('copy'), 'a video range not from 0 re-encodes');
   assert.throws(() => ffmpegPlan([], { input: 'a', output: 'b', ext: 'm4a', video: false, tmp }));
 }
+
+// ---- update.js isNewer (mirrors core_ui's app_update_test.dart) ----
+assert.ok(isNewer('0.3.0', '0.2.0'));
+assert.ok(isNewer('1.10.0', '1.9.9'), 'numeric, not text');
+assert.ok(isNewer('2.0', '1.9.9'));
+assert.ok(!isNewer('0.3.0', '0.3.0'));
+assert.ok(!isNewer('1.2.0+9', '1.2.0+1'), 'build number ignored');
+assert.ok(!isNewer('0.2.9', '0.3.0'), 'never offer a downgrade');
 
 console.log('test.mjs: all checks passed');
