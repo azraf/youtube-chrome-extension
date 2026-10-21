@@ -3,6 +3,7 @@
 // Screens read db rows; live progress lives in `progress` (not in the db).
 import * as db from './db.js';
 import * as yt from './yt.js';
+import { isClip, sourceOf, newClipId, compose, toLocal, totalMs, ffmpegPlan, copyIsExact, descriptionFor } from './clip.js';
 
 /** downloadId → { got, total, bps } while downloading, { phase: 'merging', fraction } while muxing. */
 export const progress = new Map();
@@ -25,7 +26,7 @@ export async function init() {
     await db.updateDownload(d.id, { status: 'failed', error: 'interrupted' });
   }
   const dir = await media();
-  for await (const name of dir.keys()) if (/\.(video|audio)\.\w+$/.test(name)) await removeFile(name);
+  for await (const name of dir.keys()) if (/\.(video|audio)\.\w+$|\.edit$/.test(name)) await removeFile(name); // parts, unfinished editor saves
 }
 
 // ponytail: one download at a time (FIFO); the app runs 2 slots.
@@ -70,7 +71,7 @@ async function cancel(id) {
   job.ac.abort();
   const i = waiting.indexOf(id);
   if (i >= 0) { waiting.splice(i, 1); jobs.delete(id); }
-  if (job.ac.signal.aborted && current === id && ff) { ff.terminate(); ff = null; } // a running merge can't be aborted otherwise
+  if (job.ac.signal.aborted && ffUser === id && ff) { ff.terminate(); ff = null; } // a running merge can't be aborted otherwise
   await job.settled;
 }
 
@@ -113,6 +114,7 @@ const trackLabel = (r, id) => (r.audioTracks.length > 1 ? yt.audioFor(r, id).tra
 
 /** @returns 'queued' | 'skipped' | 'failed'. track: an audio track id (see yt.audioTracks). */
 export async function enqueueAudio(videoId, { force = false, track } = {}) {
+  if (isClip(videoId)) return enqueueClip(videoId, 'audio', { force, track });
   if (await db.doneDownload(videoId, 'audio')) return 'skipped';
   const r = await resolveOrFail(videoId, 'audio', force);
   if (!r) return 'failed';
@@ -129,6 +131,7 @@ export async function enqueueAudio(videoId, { force = false, track } = {}) {
 }
 
 export async function enqueueVideo(videoId, { force = false, track } = {}) {
+  if (isClip(videoId)) return enqueueClip(videoId, 'video', { force, track });
   if (await db.doneDownload(videoId, 'video')) return 'skipped';
   const r = await resolveOrFail(videoId, 'video', force);
   if (!r) return 'failed';
@@ -260,53 +263,264 @@ async function ffmpeg() {
   return (ff = f);
 }
 
+// One ffmpeg job at a time: merges, clip cuts and the editor share the worker
+// (and its /in mount). ffUser = whose job runs, so cancelling a download never
+// kills someone else's.
+let ffChain = Promise.resolve();
+let ffUser = null;
+function withFF(user, fn) {
+  const run = ffChain.then(async () => {
+    ffUser = user;
+    try { return await fn(await ffmpeg()); } finally { ffUser = null; }
+  });
+  ffChain = run.catch(() => {});
+  return run;
+}
+
+/**
+ * Run a plan's ffmpeg commands over OPFS files (mounted at /in, read in place)
+ * and write /out to the OPFS file outName. A crashed or killed worker never
+ * settles exec(), so every step races a time budget and the signal.
+ * outMs: the output's length, for progress (0..1 via onFraction).
+ */
+async function ffRun(user, files, plan, outName, { budgetMs, outMs = 0, onFraction, signal }) {
+  return withFF(user, async (f) => {
+    signal?.throwIfAborted();
+    let lastLog = '';
+    let step = 0;
+    const onLog = ({ message }) => { if (message.trim()) lastLog = message; };
+    const onProgress = ({ progress: x, time }) => {
+      const part = outMs && time > 0 ? time / 1000 / outMs : x || 0;
+      onFraction?.(Math.min(1, Math.max(0, (step + Math.min(1, part)) / plan.runs.length)));
+    };
+    onFraction?.(0);
+    f.on('log', onLog);
+    f.on('progress', onProgress);
+    let timer;
+    const stop = new Promise((_, no) => {
+      timer = setTimeout(() => no(new Error('ffmpeg timed out')), budgetMs);
+      signal?.addEventListener('abort', () => no(signal.reason), { once: true });
+    });
+    stop.catch(() => {});
+    try {
+      await f.createDir('/in').catch(() => {});
+      // WORKERFS keeps each File's own name.
+      await f.mount('WORKERFS', { files }, '/in');
+      if (plan.list) await f.writeFile(plan.listPath, plan.list);
+      for (; step < plan.runs.length; step++) {
+        const code = await Promise.race([f.exec(plan.runs[step]), stop]);
+        if (code !== 0) throw new Error(`ffmpeg: ${lastLog || `exit ${code}`}`);
+      }
+      const data = await Promise.race([f.readFile('/out'), stop]);
+      // createWritable writes a swap file and swaps it in on close: the old file survives a failure.
+      const out = await (await (await media()).getFileHandle(outName, { create: true })).createWritable();
+      await out.write(data);
+      await out.close();
+      await f.unmount('/in').catch(() => {});
+      for (const t of ['/out', ...plan.temps]) await f.deleteFile(t).catch(() => {});
+    } catch (e) {
+      if (ff === f) { f.terminate(); ff = null; } // next job gets a fresh worker
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      f.off('log', onLog);
+      f.off('progress', onProgress);
+    }
+  });
+}
+
 /** Same command as the app: -c copy, no re-encode. Times out, and dies with its download. */
 async function mux(id, videoId, vName, aName, signal) {
   await db.updateDownload(id, { status: 'muxing' });
   const [vf, af] = await Promise.all([fileOf(vName), fileOf(aName)]);
   if (vf.size + af.size > MUX_LIMIT) throw new Error('Too large to merge in the browser — download the audio instead');
-  const f = await ffmpeg();
-  signal.throwIfAborted();
-  let lastLog = '';
-  const onLog = ({ message }) => { if (message.trim()) lastLog = message; };
-  const onProgress = ({ progress: x }) => report(id, { phase: 'merging', fraction: Math.min(1, Math.max(0, x || 0)) });
   report(id, { phase: 'merging', fraction: 0 });
-  f.on('log', onLog);
-  f.on('progress', onProgress);
-  // A crashed or killed worker never settles exec(); race it against a budget and the signal.
+  // The muxer writes by extension, so /out gets an explicit format.
+  const plan = { runs: [['-y', '-i', `/in/${vf.name}`, '-i', `/in/${af.name}`, '-c', 'copy', '-f', 'mp4', '/out']], list: null, temps: [] };
   // ponytail: 5 min + 0.2 s/MB budget, a guess — copying 1 GB takes well under a minute.
-  let timer;
-  const stop = new Promise((_, no) => {
-    timer = setTimeout(() => no(new Error('Merging timed out')), 5 * 60000 + ((vf.size + af.size) / 1e6) * 200);
-    signal.addEventListener('abort', () => no(signal.reason), { once: true });
+  await ffRun(id, [vf, af], plan, `${videoId}.mp4`, {
+    budgetMs: 5 * 60000 + ((vf.size + af.size) / 1e6) * 200,
+    onFraction: (fraction) => report(id, { phase: 'merging', fraction }),
+    signal,
   });
-  try {
-    await f.createDir('/in').catch(() => {});
-    // WORKERFS keeps each File's own name.
-    await f.mount('WORKERFS', { files: [vf, af] }, '/in');
-    const code = await Promise.race([f.exec(['-y', '-i', `/in/${vf.name}`, '-i', `/in/${af.name}`, '-c', 'copy', '/out.mp4']), stop]);
-    if (code !== 0) throw new Error(`mux: ${lastLog || `exit ${code}`}`);
-    const data = await Promise.race([f.readFile('/out.mp4'), stop]);
-    const out = await (await (await media()).getFileHandle(`${videoId}.mp4`, { create: true })).createWritable();
-    await out.write(data);
-    await out.close();
-    await f.unmount('/in').catch(() => {});
-    await f.deleteFile('/out.mp4').catch(() => {});
-  } catch (e) {
-    if (ff === f) { f.terminate(); ff = null; } // next merge gets a fresh worker
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    f.off('log', onLog);
-    f.off('progress', onProgress);
-  }
   await removeFile(vName);
   await removeFile(aName);
   signal.throwIfAborted();
   await finalize(id, videoId, `${videoId}.mp4`);
 }
 
+// ---- the editor: cut a finished download ----
+// Every file of one video (its audio and its video download) holds the same
+// source ranges, so playing either — or the phone's audio + picture pair —
+// shows the same moment. Saves re-cut all of them; a download landing later
+// is cut to match (conform).
+
+const extOf = (name) => name.split('.').pop();
+const FORMAT = { mp4: 'mp4', m4a: 'mp4', webm: 'webm' }; // muxer per container (the temp names have no usable extension)
+const WHOLE = [[0, Number.MAX_SAFE_INTEGER]]; // an untouched file: the whole source
+
+/** The source ranges a finished file holds; null = all of it (untouched download). */
+const fileSegments = async (d) => d.segments ?? (isClip(d.videoId) ? (await db.videoById(d.videoId))?.segments ?? null : null);
+
+/** The ranges a video's files hold or must hold: its edited files', else a clip's own. */
+async function timelineOf(videoId, exceptId = null) {
+  for (const d of await db.downloadsOf(videoId)) {
+    if (d.status === 'done' && d.id !== exceptId && (await fileSegments(d))) return fileSegments(d);
+  }
+  return isClip(videoId) ? (await db.videoById(videoId))?.segments ?? null : null;
+}
+const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+/** Cut `keep` (ms, the file's own timeline) out of OPFS inName into outName, exactly (clip.js ffmpegPlan). */
+async function cutFile(user, inName, outName, keep, { video, onFraction, signal }) {
+  const file = await fileOf(inName);
+  const ext = extOf(inName);
+  const fmt = FORMAT[ext] ?? ext;
+  const plan = ffmpegPlan(keep, { input: `/in/${file.name}`, output: '/out', ext, video, preset: 'ultrafast', tmp: (n) => `/cut${n}` });
+  // Temps and /out have no media extension: name the muxer for every output.
+  plan.runs = plan.runs.map((r) => [...r.slice(0, -1), '-f', fmt, r.at(-1)]);
+  const outMs = totalMs(keep);
+  await ffRun(user, [file], plan, outName, {
+    // ponytail: budget guesses — copy 5 min + 0.2 s/MB; re-encode 10 min + 4× the output's length.
+    budgetMs: copyIsExact(keep, video) ? 5 * 60000 + (file.size / 1e6) * 200 : 10 * 60000 + outMs * 4,
+    outMs: plan.runs.length > 1 ? 0 : outMs,
+    onFraction, signal,
+  });
+}
+
+/** Re-cut a finished file in place so it holds exactly `target` (source ranges). */
+async function conform(user, d, target, { onFraction, signal } = {}) {
+  const have = await fileSegments(d);
+  if (same(have, target)) return;
+  const keep = toLocal(have ?? WHOLE, target);
+  if (!keep.length) throw new Error(`The ${d.kind} file doesn't hold the edited part`);
+  await cutFile(user, d.fileName, d.fileName, keep, { video: d.kind === 'video', onFraction, signal });
+  await db.updateDownload(d.id, { fileSize: (await fileOf(d.fileName)).size, segments: target });
+}
+
+/** Does saving `keep` re-encode a video (slow) — this file or a sibling video? For the editor's note. */
+export async function editReencodes(d, keep, fileMs) {
+  const target = compose((await fileSegments(d)) ?? [[0, fileMs]], keep);
+  for (const x of await db.downloadsOf(d.videoId)) {
+    if (x.status === 'done' && x.kind === 'video' && !copyIsExact(toLocal((await fileSegments(x)) ?? WHOLE, target), true)) return true;
+  }
+  return false;
+}
+
+/**
+ * Editor › Save: every file of this video (this one and its audio/video
+ * sibling) is cut to the kept ranges. All are cut to temp files first and
+ * swapped in only when every cut worked, so a cancel or failure leaves both
+ * files as they were — never one cut and one not. fileMs = this file's length
+ * (from the preview). A clip's row follows its files.
+ */
+export async function saveEdit(d, keep, fileMs, { onFraction, signal } = {}) {
+  const target = compose((await fileSegments(d)) ?? [[0, fileMs]], keep);
+  const files = (await db.downloadsOf(d.videoId)).filter((x) => x.status === 'done').sort((a, b) => (b.id === d.id) - (a.id === d.id)); // this file first
+  const staged = [];
+  try {
+    for (const [i, x] of files.entries()) {
+      const have = await fileSegments(x);
+      if (same(have, target)) continue;
+      const local = toLocal(have ?? WHOLE, target);
+      if (!local.length) throw new Error(`The ${x.kind} file doesn't hold the edited part`);
+      const tmp = `${x.fileName}.edit`;
+      staged.push([x, tmp]);
+      await cutFile('edit', x.fileName, tmp, local, { video: x.kind === 'video', signal, onFraction: (f) => onFraction?.((i + f) / files.length) });
+    }
+  } catch (e) {
+    for (const [, tmp] of staged) await removeFile(tmp);
+    throw e;
+  }
+  const dir = await media();
+  for (const [x, tmp] of staged) {
+    await removeFile(x.fileName);
+    await (await dir.getFileHandle(tmp)).move(x.fileName);
+    await db.updateDownload(x.id, { fileSize: (await fileOf(x.fileName)).size, segments: target });
+  }
+  if (isClip(d.videoId)) await db.setClipSegments(d.videoId, target);
+  await db.saveResumePosition(d.videoId, 0);
+}
+
+/**
+ * Editor › Save as: the kept ranges become a new clip (video row + finished
+ * download), optionally added to playlistId. Returns the clip's id.
+ */
+export async function saveEditAs(d, keep, fileMs, { title, playlistId = null, onFraction, signal } = {}) {
+  const v = await db.videoById(d.videoId);
+  const segs = compose((await fileSegments(d)) ?? [[0, fileMs]], keep);
+  const clipId = newClipId(d.videoId);
+  const name = `${clipId}.${extOf(d.fileName)}`;
+  try {
+    await cutFile('edit', d.fileName, name, keep, { video: d.kind === 'video', onFraction, signal });
+  } catch (e) {
+    await removeFile(name);
+    throw e;
+  }
+  await db.upsertVideo({
+    id: clipId, title: title || `${v?.title ?? d.videoId} (clip)`, channel: v?.channel ?? '',
+    durationMs: totalMs(segs), thumbnailUrl: v?.thumbnailUrl || yt.thumbOf(sourceOf(clipId)), uploadedAt: v?.uploadedAt ?? null,
+    addedAt: Date.now(), description: v?.description ?? null, segments: segs, dirty: true,
+  });
+  const id = await db.insertDownload({
+    videoId: clipId, kind: d.kind, status: 'queued', createdAt: Date.now(), fileName: name,
+    quality: d.quality, audioTrack: d.audioTrack ?? null, segments: segs,
+  });
+  await finalize(id, clipId, name);
+  if (playlistId) await db.addVideoToPlaylist(playlistId, clipId);
+  return clipId;
+}
+
+/**
+ * A clip's download: the source's file of that kind (downloaded first if
+ * needed — the queue is FIFO, so the cut runs after it), then the clip's
+ * ranges cut out of it — the same ranges as the clip's other file, if any.
+ */
+async function enqueueClip(clipId, kind, opts) {
+  if (await db.doneDownload(clipId, kind)) return 'skipped';
+  const failed = async (reason) => {
+    await fail(await db.insertDownload({ videoId: clipId, kind, status: 'queued', createdAt: Date.now() }), reason);
+    return 'failed';
+  };
+  const segments = await timelineOf(clipId);
+  if (!segments?.length) return failed('This clip has no segments');
+  const src = sourceOf(clipId);
+  if (!(await db.videoById(src))) { // a clip synced from another device: its source isn't in this library
+    try {
+      const m = await yt.fetchMeta(src);
+      await db.upsertVideo({ ...m, id: src, addedAt: Date.now(), description: descriptionFor(src, m.description) });
+    } catch { /* the download shows the bare id */ }
+  }
+  const sourceActive = (await db.downloadsOf(src)).some((x) => x.kind === kind && ['queued', 'running', 'muxing'].includes(x.status));
+  if (!(await db.doneDownload(src, kind)) && !sourceActive) {
+    if ((await (kind === 'audio' ? enqueueAudio : enqueueVideo)(src, opts)) === 'failed') return failed('The source video could not be downloaded');
+  }
+  const id = await db.insertDownload({ videoId: clipId, kind, status: 'queued', createdAt: Date.now(), segments });
+  queue(id, async (signal) => {
+    const s = await db.doneDownload(src, kind);
+    if (!s) throw new Error('The source download did not finish');
+    const keep = toLocal((await fileSegments(s)) ?? WHOLE, segments);
+    if (!keep.length) throw new Error("The source's downloaded file was edited and no longer holds this clip");
+    const name = `${clipId}.${extOf(s.fileName)}`;
+    await db.updateDownload(id, { fileName: name });
+    report(id, { phase: 'cutting', fraction: 0 });
+    await cutFile(id, s.fileName, name, keep, {
+      video: kind === 'video', signal,
+      onFraction: (fraction) => report(id, { phase: 'cutting', fraction }),
+    });
+    await finalize(id, clipId, name);
+  });
+  return 'queued';
+}
+
 async function finalize(id, videoId, name) {
+  // A new download of a video whose other file was edited: cut it to match.
+  const target = await timelineOf(videoId, id);
+  const d = await db.downloadById(id);
+  if (target && d && !same(await fileSegments({ ...d, fileName: name }), target)) {
+    report(id, { phase: 'cutting', fraction: 0 });
+    await conform(id, { ...d, fileName: name }, target, { onFraction: (fraction) => report(id, { phase: 'cutting', fraction }) });
+  }
   const size = (await fileOf(name)).size;
   await saveThumb(videoId);
   await db.updateDownload(id, { status: 'done', fileName: name, fileSize: size, completedAt: Date.now() });
@@ -315,7 +529,7 @@ async function finalize(id, videoId, name) {
 /** Thumbnail next to the media so the library looks right offline. Best effort. */
 async function saveThumb(videoId) {
   try {
-    const res = await fetch(yt.thumbOf(videoId), { credentials: 'omit' });
+    const res = await fetch(yt.thumbOf(sourceOf(videoId)), { credentials: 'omit' });
     if (!res.ok) return;
     const out = await (await (await media()).getFileHandle(`${videoId}.jpg`, { create: true })).createWritable();
     await res.body.pipeTo(out);

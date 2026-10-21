@@ -46,6 +46,7 @@
       <button class="icon" data-act="nAdd" title="Add to library…" aria-label="Add to library">＋</button>
       <button class="icon" data-act="nDlAudio" title="Download audio" aria-label="Download audio">♪</button>
       <button class="icon" data-act="nDlVideo" title="Download video" aria-label="Download video">⬇</button>
+      <button id="n-edit" class="icon" data-act="nEdit" title="Edit the downloaded file: split, keep parts, save" aria-label="Edit" hidden>✂</button>
     </div>
     <p class="now-empty muted">Nothing playing. Press ▶ on any video in your <a href="#library">Library</a>, a playlist, <a href="#downloads">Downloads</a> or <a href="#search">Search</a>.</p>
     <div id="stage">
@@ -61,6 +62,10 @@
     <div class="now-meta">
       <div id="n-title" class="title2"></div>
       <div id="n-sub" class="muted"></div>
+      <details id="n-desc-wrap" class="desc" hidden>
+        <summary>Description</summary>
+        <textarea id="n-desc" rows="6" data-change="nDesc" aria-label="Description" placeholder="Notes, the link, YouTube's description…"></textarea>
+      </details>
       <div id="n-error" class="error" hidden>
         <span id="n-error-text"></span>
         <button class="secondary" data-act="nRetry">Retry</button>

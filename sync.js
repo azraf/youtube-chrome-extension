@@ -3,6 +3,7 @@
 // ponytail: pull-then-push with a basedOn guard — a web edit landing between
 // the two is delayed one sync, never lost. Full-snapshot push, no delta.
 import * as db from './db.js';
+import { isClip, descriptionFor } from './clip.js';
 
 export const BASE_URL = 'https://app.makewebsmart.com';
 const APP = 'youtube_personal';
@@ -139,24 +140,33 @@ async function applyPlaylist(p, videos) {
   return id;
 }
 
-const upsertVideo = (v) => db.upsertVideo({
-  id: v.id,
-  title: v.title || v.id,
-  channel: v.channel ?? '',
-  durationMs: +v.durationMs || 0,
-  thumbnailUrl: v.thumbnailUrl ?? '',
-  addedAt: Date.parse(v.addedAt ?? '') || Date.now(),
-  uploadedAt: Date.parse(v.uploadedAt ?? '') || null,
-});
+async function upsertVideo(v) {
+  const extra = { description: typeof v.description === 'string' ? v.description : null, segments: Array.isArray(v.segments) ? v.segments : null };
+  await db.upsertVideo({
+    id: v.id,
+    title: v.title || v.id,
+    channel: v.channel ?? '',
+    durationMs: +v.durationMs || 0,
+    thumbnailUrl: v.thumbnailUrl ?? '',
+    addedAt: Date.parse(v.addedAt ?? '') || Date.now(),
+    uploadedAt: Date.parse(v.uploadedAt ?? '') || null,
+    ...extra,
+  });
+  await db.applyRemoteVideo(v.id, extra); // an existing row takes web edits too
+}
 
 /** Web-added videos come with oEmbed data (no duration) or as bare ids. Best effort. */
 async function fillMissingMeta(playlistIds, fetchMeta) {
   const seen = new Set();
   for (const id of playlistIds) {
     for (const v of await db.playlistVideos(id)) {
-      if (v.durationMs > 0 || seen.has(v.id)) continue;
+      if (v.durationMs > 0 || isClip(v.id) || seen.has(v.id)) continue;
       seen.add(v.id);
-      try { await db.updateVideoMeta(v.id, await fetchMeta(v.id)); } catch { /* next sync tries again */ }
+      try {
+        const m = await fetchMeta(v.id);
+        await db.updateVideoMeta(v.id, m);
+        await db.fillDescription(v.id, descriptionFor(v.id, m.description));
+      } catch { /* next sync tries again */ }
     }
   }
 }
@@ -164,10 +174,11 @@ async function fillMissingMeta(playlistIds, fetchMeta) {
 // ---- push ----
 
 async function push(token) {
+  const dirty = await db.dirtyVideos();
   const snapshot = await db.exportLibrary();
   const bytes = new TextEncoder().encode(JSON.stringify(snapshot));
   const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((b) => b.toString(16).padStart(2, '0')).join('');
-  if (hash === (await db.getSetting('syncLastHash'))) return;
+  if (hash === (await db.getSetting('syncLastHash'))) return db.clearDirty(dirty); // the server has it already
   const res = await call('PUT', '/api/v1/youtube/library', { token, body: { ...snapshot, basedOn: await db.getSetting('syncSince') } });
   const ids = res.playlistIds ?? {};
   for (const p of await db.playlists()) {
@@ -176,4 +187,5 @@ async function push(token) {
   }
   await db.setSetting('syncSince', res.now);
   await db.setSetting('syncLastHash', hash);
+  await db.clearDirty(dirty);
 }

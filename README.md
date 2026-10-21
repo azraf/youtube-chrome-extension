@@ -66,6 +66,8 @@ Open a playlist to **Play all**, **Shuffle play**, **Download all audio / video*
 - **Audio track**: pick a dubbed language, if the video has one.
 - **Play live stream** appears on a downloaded video and plays YouTube's version instead of your file.
 - **＋ / ♪ / ⬇**: add the current video to the library, or download it.
+- **✂** (on a downloaded video) opens the [editor](#editor).
+- **Description**: open it under the title. It starts with the YouTube link followed by YouTube's own description, and you can change it to anything. Changes save when you click outside the box, and sync to the website and the phone app.
 - If playback fails, use **Retry** or **Try 360p**.
 
 The mini player at the bottom keeps playing while you browse the other pages. Click it to return to the Player.
@@ -75,11 +77,31 @@ The mini player at the bottom keeps playing while you browse the other pages. Cl
 This page shows progress, size and the audio track for each download. For each one you can:
 
 - **▶** play it offline
+- **✂** open it in the [editor](#editor)
 - **💾** save the file to disk
 - **Remove after…** delete it automatically after a number of days
 - **Cancel** or **🗑** delete it, and **Retry** a failed one
 
 Downloads are stored inside the browser, not in your Downloads folder. To get a normal file, use 💾.
+
+### Editor
+
+The editor splits a downloaded video or audio file into parts. You choose which parts to keep, then save the result.
+
+1. Play or scrub to the point you want, then click **Split at …**. Repeat to make more parts.
+2. Click a part on the timeline to keep it (solid) or drop it (striped). Kept parts are joined in order.
+3. **Remove nearest split** joins the two parts around the playhead again. **Reset** starts over.
+4. Save:
+   - **Save** replaces this file with the kept parts. This cannot be undone.
+   - **Save as new** keeps this file and makes a new **clip** from the kept parts. You can give it a title and add it to a playlist, either an existing one or a new one.
+
+Cuts are exact, so picture and sound always stay together:
+
+- **Audio** is saved instantly, with no loss of quality.
+- **Video** is saved instantly when you only trim the end. Any other video cut is re-encoded so it starts on the exact frame. That takes a while in the browser, about real time or longer, and the progress bar shows how far it has got.
+- If a video has both an audio download and a video download, **Save** cuts both the same way, so both files always show the same part. A cancelled or failed save changes neither file. If you download the other kind later, it is cut to match.
+
+Clips sync to the website and the phone app with their parts. A device without the clip's file streams the original YouTube video and plays only those parts. Downloading a clip there downloads the original and cuts the clip out of it.
 
 ### Search
 

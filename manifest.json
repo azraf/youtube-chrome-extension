@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Personal YouTube",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Download YouTube videos, shorts and playlists, organise them, play them offline.",
   "minimum_chrome_version": "121",
   "action": { "default_popup": "popup.html", "default_title": "Personal YouTube" },

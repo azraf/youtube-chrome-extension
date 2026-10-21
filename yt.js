@@ -44,6 +44,7 @@ export function metaOf(pr, id = pr?.videoDetails?.videoId) {
   return {
     id, title: d.title ?? '', channel: d.author ?? '', durationMs: (+d.lengthSeconds || 0) * 1000,
     thumbnailUrl: id ? thumbOf(id) : '', uploadedAt: up ? Date.parse(up) || null : null,
+    description: d.shortDescription ?? '',
   };
 }
 

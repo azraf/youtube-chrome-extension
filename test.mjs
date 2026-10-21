@@ -1,6 +1,7 @@
 // node apps/youtube_extension/test.mjs — pure checks, no browser needed.
 import assert from 'node:assert/strict';
 import { extractVideoId, extractPlaylistId, isPlaylistUrl, parseInput } from './parse.js';
+import * as clip from './clip.js';
 import { pickStreams, videoUrlUpTo, playlistPage, searchPage, audioFor, trackFor, videoFor, dashManifest } from './yt.js';
 
 // ---- extractVideoId ----
@@ -53,7 +54,7 @@ const EN = { id: 'en.3', displayName: 'English', audioIsDefault: false };
 const ranges = { initRange: { start: '0', end: '740' }, indexRange: { start: '741', end: '2000' } };
 const pr = {
   playabilityStatus: { status: 'OK' },
-  videoDetails: { title: 'T', author: 'C', lengthSeconds: '212' },
+  videoDetails: { title: 'T', author: 'C', lengthSeconds: '212', shortDescription: 'About it' },
   microformat: { playerMicroformatRenderer: { uploadDate: '2009-10-25T00:00:00-07:00' } },
   streamingData: {
     formats: [f(18, 'video/mp4; codecs="avc1.42001E, mp4a.40.2"', { bitrate: 500, contentLength: undefined })],
@@ -98,6 +99,7 @@ assert.equal(videoFor(s, { maxBytes: 550, audioBytes: 100 }).height, 480);
 assert.equal(videoFor(s, { maxBytes: 10, audioBytes: 100 }).height, 480); // none fits → smallest
 assert.equal(s.expiresAt, 2000000000 * 1000 - 5 * 60 * 1000);
 assert.equal(s.durationMs, 212000);
+assert.equal(s.description, 'About it');
 assert.equal(s.title, 'T');
 assert.throws(() => pickStreams({ playabilityStatus: { status: 'LOGIN_REQUIRED', reason: 'Sign in to confirm' } }), /Sign in/);
 // YouTube's bot check gets a plain explanation and is marked expected (not logged as an error)
@@ -263,6 +265,74 @@ await assert.rejects(fetchRanges({
   ];
   assert.deepEqual(unusedFiles(names, rows, new Set([3])).sort(), [
     'DDDDDDDDDDD.audio.m4a', 'DDDDDDDDDDD.video.mp4', 'EEEEEEEEEEE.jpg', 'EEEEEEEEEEE.m4a', 'FFFFFFFFFFF.mp4']);
+}
+
+// ---- clip.js (mirrored by apps/youtube_personal/test/clip_test.dart) ----
+{
+  const { isClip, sourceOf, newClipId, totalMs, descriptionFor, newEdit, addSplit, removeSplit, toggleKeep, segmentsOf,
+    keptSegments, compose, toLocal, nextJump, ffmpegPlan, copyIsExact } = clip;
+  const cid = newClipId(ID, 1700000000000);
+  assert.equal(cid, `${ID}~loyw3v28`);
+  assert.ok(cid.length <= 32 && isClip(cid) && !isClip(ID));
+  assert.equal(sourceOf(cid), ID);
+  assert.equal(newClipId(cid, 1).split('~').length, 2, 'a clip of a clip names the source');
+  assert.equal(descriptionFor(ID, '  Hello \n'), `https://youtu.be/${ID}\n\nHello`);
+  assert.equal(descriptionFor(cid, ''), `https://youtu.be/${ID}`);
+
+  // split 10 s into 0–3, 3–7, 7–10; drop the middle
+  let e = addSplit(addSplit(newEdit(), 7000), 3000);
+  assert.deepEqual(e, { splits: [3000, 7000], keep: [true, true, true] });
+  e = toggleKeep(e, 1);
+  assert.deepEqual(segmentsOf(e, 10000).map((x) => [x.start, x.end, x.keep]), [[0, 3000, true], [3000, 7000, false], [7000, 10000, true]]);
+  assert.deepEqual(keptSegments(e, 10000), [[0, 3000], [7000, 10000]]);
+  assert.equal(totalMs(keptSegments(e, 10000)), 6000);
+  assert.deepEqual(addSplit(e, 3000), e, 'same point twice');
+  assert.deepEqual(addSplit(e, 0), e, 'nothing before 0');
+  assert.deepEqual(keptSegments(removeSplit(e, 0), 10000), [[0, 10000]], 'kept + dropped merge to kept');
+  assert.deepEqual(keptSegments(newEdit(), 5000), [[0, 5000]]);
+  assert.deepEqual(keptSegments(toggleKeep(toggleKeep(e, 0), 2), 10000), []);
+
+  // timelines: a clip of [10–20 s, 30–40 s]; its own 5–15 s is source 15–20 + 30–35
+  const parent = [[10000, 20000], [30000, 40000]];
+  assert.deepEqual(compose(parent, [[5000, 15000]]), [[15000, 20000], [30000, 35000]]);
+  assert.deepEqual(compose([[0, 60000]], [[1000, 2000]]), [[1000, 2000]]);
+  assert.deepEqual(compose(parent, [[0, 10000], [10000, 20000]]), parent, 'touching ranges re-join only when contiguous at source');
+  assert.deepEqual(toLocal(parent, [[15000, 35000]]), [[5000, 15000]]);
+  assert.deepEqual(toLocal(parent, [[0, 5000]]), [], 'not in the file');
+  assert.deepEqual(toLocal(parent, compose(parent, [[2000, 12000]])), [[2000, 12000]], 'round trip');
+
+  // streaming a clip
+  const segs = [[10000, 20000], [30000, 40000]];
+  assert.deepEqual(nextJump(segs, 0), { seek: 10000 });
+  assert.equal(nextJump(segs, 9800), null, 'a seek landing a hair early does not loop');
+  assert.equal(nextJump(segs, 15000), null);
+  assert.deepEqual(nextJump(segs, 20100), { seek: 30000 });
+  assert.equal(nextJump(segs, 40000), 'end');
+
+  // ffmpeg plans: exact everywhere (the A/V checks behind these rules are in clip.js)
+  const tmp = (n) => `/t${n}`;
+  assert.ok(copyIsExact([[1, 2], [3, 4]], false) && copyIsExact([[0, 5000]], true));
+  assert.ok(!copyIsExact([[1000, 5000]], true) && !copyIsExact([[0, 1000], [2000, 3000]], true));
+  const one = ffmpegPlan([[1500, 4000]], { input: 'in.m4a', output: 'out.m4a', ext: 'm4a', video: false, tmp });
+  assert.deepEqual(one.runs, [['-y', '-i', 'in.m4a', '-ss', '1.500', '-t', '2.500', '-c', 'copy', 'out.m4a']], 'audio: copy, output seeking');
+  assert.equal(one.list, null);
+  const trim = ffmpegPlan([[0, 9000]], { input: 'in.mp4', output: 'out.mp4', ext: 'mp4', video: true, tmp });
+  assert.deepEqual(trim.runs, [['-y', '-i', 'in.mp4', '-t', '9.000', '-c', 'copy', 'out.mp4']], 'video trimmed at the end: copy');
+  const two = ffmpegPlan(segs, { input: 'in.webm', output: 'out.webm', ext: 'webm', video: false, tmp });
+  assert.equal(two.runs.length, 3);
+  assert.deepEqual(two.runs[2], ['-y', '-f', 'concat', '-safe', '0', '-i', '/tlist.txt', '-c', 'copy', 'out.webm']);
+  assert.equal(two.list, "file '/t0.webm'\nfile '/t1.webm'");
+  assert.deepEqual(two.temps, ['/t0.webm', '/t1.webm', '/tlist.txt']);
+  const pv = ffmpegPlan(segs, { input: 'in.mp4', output: 'out.mp4', ext: 'mp4', video: true, tmp });
+  assert.equal(pv.runs.length, 1, 'video ranges: one re-encode');
+  const fc = pv.runs[0][pv.runs[0].indexOf('-filter_complex') + 1];
+  assert.equal(fc, '[0:v]split=2[vi0][vi1];[0:a]asplit=2[ai0][ai1];'
+    + '[vi0]trim=start=10.000:end=20.000,setpts=PTS-STARTPTS[v0];[ai0]atrim=start=10.000:end=20.000,asetpts=PTS-STARTPTS[a0];'
+    + '[vi1]trim=start=30.000:end=40.000,setpts=PTS-STARTPTS[v1];[ai1]atrim=start=30.000:end=40.000,asetpts=PTS-STARTPTS[a1];'
+    + '[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]');
+  assert.ok(pv.runs[0].includes('libx264') && pv.runs[0].includes('aac'));
+  assert.ok(!ffmpegPlan([[1000, 2000]], { input: 'a.mp4', output: 'b.mp4', ext: 'mp4', video: true, tmp }).runs[0].includes('copy'), 'a video range not from 0 re-encodes');
+  assert.throws(() => ffmpegPlan([], { input: 'a', output: 'b', ext: 'm4a', video: false, tmp }));
 }
 
 console.log('test.mjs: all checks passed');

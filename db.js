@@ -76,7 +76,7 @@ const getOrAdd = async (store, name, row) => (await req(store.index('name').getK
 export const upsertVideo = (v) => wr(async (s) => {
   if (await req(s.videos.getKey(v.id))) return;
   await req(s.videos.add({ title: v.id, channel: '', durationMs: 0, thumbnailUrl: '', addedAt: Date.now(),
-    lastPlayedAt: null, resumePositionMs: 0, uploadedAt: null, ...defined(v) }));
+    lastPlayedAt: null, resumePositionMs: 0, uploadedAt: null, description: null, segments: null, dirty: false, ...defined(v) }));
 });
 export const videoById = (id) => rd((s) => req(s.videos.get(id)));
 export const markPlayed = (id) => wr((s) => patch(s.videos, id, { lastPlayedAt: Date.now() }));
@@ -84,6 +84,42 @@ export const markPlayed = (id) => wr((s) => patch(s.videos, id, { lastPlayedAt: 
 export const saveResumePosition = (id, ms) => wr((s) => patch(s.videos, id, { resumePositionMs: ms }), { silent: true });
 export const updateVideoMeta = (id, { title, channel, durationMs, thumbnailUrl, uploadedAt }) =>
   wr((s) => patch(s.videos, id, defined({ title, channel, durationMs, thumbnailUrl, uploadedAt })));
+
+// Description / clip segments. `description` stays null until fetched, so a null
+// never overwrites anything. A local edit marks the row `dirty`: pull leaves a
+// dirty row alone and a finished push clears the flag — the device wins a clash.
+/** The user's edit. */
+export const setVideoDescription = (id, description) => wr((s) => patch(s.videos, id, { description, dirty: true }));
+/** YouTube's text, only where nothing is set yet. */
+export const fillDescription = (id, description) => wr(async (s) => {
+  const v = await req(s.videos.get(id));
+  if (v && v.description == null) await req(s.videos.put({ ...v, description }));
+});
+/** The editor re-cut a clip's file: its segments (and so its length) changed. */
+export const setClipSegments = (id, segments) =>
+  wr((s) => patch(s.videos, id, { segments, durationMs: segments.reduce((n, [a, b]) => n + b - a, 0), dirty: true }));
+/** Pull: the server's description/segments, unless this row has unsent edits. */
+export const applyRemoteVideo = (id, { description, segments }) => wr(async (s) => {
+  const v = await req(s.videos.get(id));
+  if (!v || v.dirty) return;
+  const p = {};
+  if (typeof description === 'string' && description !== v.description) p.description = description;
+  if (Array.isArray(segments) && JSON.stringify(segments) !== JSON.stringify(v.segments ?? null)) {
+    p.segments = segments;
+    p.durationMs = segments.reduce((n, [a, b]) => n + b - a, 0);
+  }
+  if (Object.keys(p).length) await req(s.videos.put({ ...v, ...p }));
+});
+export const dirtyVideos = () => rd((s) => all(s.videos)).then((vs) => vs.filter((v) => v.dirty));
+/** After a push: clear `dirty` on rows still holding what was sent. */
+export const clearDirty = (sent) => wr(async (s) => {
+  for (const x of sent) {
+    const v = await req(s.videos.get(x.id));
+    if (v?.dirty && v.description === x.description && JSON.stringify(v.segments) === JSON.stringify(x.segments)) {
+      await req(s.videos.put({ ...v, dirty: false }));
+    }
+  }
+}, { silent: true });
 
 const recent = (key, limit) => rd((s) => all(s.videos)).then((vs) =>
   vs.filter((v) => v[key]).sort((a, b) => b[key] - a[key]).slice(0, limit));
@@ -251,7 +287,7 @@ export const exportLibrary = () => rd(async (s) => {
   return {
     videos: vids.sort((a, b) => a.addedAt - b.addedAt).map((v) => ({
       id: v.id, title: v.title, channel: v.channel, durationMs: v.durationMs, thumbnailUrl: v.thumbnailUrl,
-      uploadedAt: iso(v.uploadedAt), addedAt: iso(v.addedAt),
+      uploadedAt: iso(v.uploadedAt), addedAt: iso(v.addedAt), description: v.description ?? null, segments: v.segments ?? null,
     })),
     categories: cats.map((c) => c.name),
     tags: tgs.map((t) => t.name),

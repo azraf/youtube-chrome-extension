@@ -8,6 +8,7 @@
 import * as db from './db.js';
 import * as yt from './yt.js';
 import * as dl from './downloads.js';
+import { sourceOf, nextJump } from './clip.js';
 
 export const SPEEDS = [0.75, 1, 1.25, 1.5, 2];
 export const SLEEP_PRESETS = [15, 30, 45, 60, 90];
@@ -33,11 +34,19 @@ let retried = false;
 let loadSeq = 0; // only the latest load() may set the source
 let itemId = null; // per-item options reset when this changes
 let sleepTimer = null;
+// A clip played from its source's stream: its ranges (source ms), gaps skipped.
+// ponytail: the seek bar shows the whole source; a downloaded clip is exact.
+let clipSegs = null;
 const current = () => state.queue[state.index] ?? null;
 
 export function init(videoEl) {
   el = videoEl;
   el.addEventListener('ended', onEnded);
+  el.addEventListener('timeupdate', () => {
+    if (!clipSegs || state.loading) return;
+    const j = nextJump(clipSegs, el.currentTime * 1000);
+    if (j === 'end') { el.pause(); onEnded(); } else if (j) el.currentTime = j.seek / 1000;
+  });
   el.addEventListener('pause', persist);
   for (const ev of ['play', 'pause', 'ratechange', 'loadedmetadata', 'waiting', 'playing']) el.addEventListener(ev, () => { positionState(); emit(); });
   setInterval(() => { if (!el.paused) persist(); }, 5000);
@@ -93,7 +102,7 @@ async function sourceFor(id, force) {
       } catch { /* file gone: stream instead */ }
     }
   }
-  const r = await yt.resolve(id, { force });
+  const r = await yt.resolve(sourceOf(id), { force });
   state.tracks = r.audioTracks;
   if (!state.tracks.some((t) => t.id === state.trackId)) state.trackId = yt.trackFor(r, (await db.getSetting('audioLanguage')) ?? '');
   const mpd = yt.dashManifest(r, { trackId: state.trackId, maxHeight: state.quality === 'high' ? 1080 : 360, video: state.showVideo });
@@ -105,7 +114,7 @@ async function sourceFor(id, force) {
     : { url: a.url, mime: MIME[a.ext] ?? 'audio/mp4', local: false };
 }
 
-async function load(i, at = null) {
+async function load(i, at = null, play = true) {
   if (i < 0 || i >= state.queue.length) return;
   state.index = i;
   state.error = null;
@@ -125,17 +134,18 @@ async function load(i, at = null) {
   emit();
   try {
     const v = await db.videoById(item.id);
-    const resume = at ?? ((v?.resumePositionMs ?? 0) > 5000 ? v.resumePositionMs / 1000 : 0);
     const src = await sourceFor(item.id, false);
     if (mine !== loadSeq) { if (src.own) URL.revokeObjectURL(src.url); return; } // superseded
-    await setSource(item, src, resume, mine);
+    clipSegs = !src.local && v?.segments?.length ? v.segments : null;
+    const resume = at ?? (clipSegs ? clipSegs[0][0] / 1000 : (v?.resumePositionMs ?? 0) > 5000 ? v.resumePositionMs / 1000 : 0);
+    await setSource(item, src, resume, mine, play);
     db.markPlayed(item.id);
   } catch (e) {
     if (mine === loadSeq) await onError(e);
   }
 }
 
-async function setSource(item, src, at, mine) {
+async function setSource(item, src, at, mine, play = true) {
   const p = await shakaPlayer();
   state.local = src.local;
   el.poster = (await dl.thumbUrl(item.id)) ?? item.thumbnailUrl ?? '';
@@ -151,11 +161,13 @@ async function setSource(item, src, at, mine) {
   el.defaultPlaybackRate = el.playbackRate = state.speed;
   state.loading = false;
   emit();
-  await el.play().catch(() => {}); // autoplay blocks etc. are not playback errors
+  if (play) await el.play().catch(() => {}); // autoplay blocks etc. are not playback errors
 }
 
 /** Reload the current item at the current time (after an option change). */
 const reload = () => (state.index >= 0 ? load(state.index, el.currentTime || 0) : null);
+/** The editor replaced this video's files: drop the old one, cue the new one from the start (paused). */
+export const reloadIfCurrent = (id) => (current()?.id === id ? load(state.index, 0, false) : null);
 
 /** Stream URLs die (~6 h) or get revoked: re-resolve once, then surface. */
 async function onError(e) {
@@ -199,7 +211,7 @@ function onEnded() {
 
 function persist() {
   const item = current();
-  if (item && el.currentTime > 0) db.saveResumePosition(item.id, Math.round(el.currentTime * 1000));
+  if (item && el.currentTime > 0 && !clipSegs) db.saveResumePosition(item.id, Math.round(el.currentTime * 1000)); // a streamed clip's time is the source's
 }
 
 export const toggle = () => (el.paused ? el.play() : el.pause());

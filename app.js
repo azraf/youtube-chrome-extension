@@ -7,6 +7,8 @@ import * as dl from './downloads.js';
 import * as player from './player.js';
 import * as sync from './sync.js';
 import { extractVideoId, extractPlaylistId, isPlaylistUrl, parseInput, extractUrls } from './parse.js';
+import { isClip, sourceOf, descriptionFor } from './clip.js';
+import { openEditor } from './editor.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -25,11 +27,12 @@ const fmtEta = (sec) => {
   return s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.floor(s / 60) % 60} min` : s >= 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s} s`;
 };
 /** Live progress of a download: bar value 0..1 and its one-line description. */
-const progressFraction = (p) => (p?.phase === 'merging' ? p.fraction : p?.total ? p.got / p.total : 0);
+const progressFraction = (p) => (p?.phase === 'merging' || p?.phase === 'cutting' ? p.fraction : p?.total ? p.got / p.total : 0);
 function progressText(p, status) {
   if (status === 'queued') return 'waiting in queue';
   if (!p) return status === 'muxing' ? 'merging video + audio…' : 'starting…';
   if (p.phase === 'merging') return `merging video + audio… ${Math.round(p.fraction * 100)}%`;
+  if (p.phase === 'cutting') return `cutting to the edited part… ${Math.round(p.fraction * 100)}%`;
   return [
     p.total ? `${Math.floor((p.got / p.total) * 100)}%` : null,
     p.total ? `${fmtBytes(p.got)} / ${fmtBytes(p.total)}` : fmtBytes(p.got),
@@ -72,7 +75,9 @@ const buttons = (ok = 'Save') =>
 async function ensureVideo(id, meta = null) {
   if (await db.videoById(id)) return;
   meta ??= await yt.fetchMeta(id);
-  await db.upsertVideo({ ...meta, id, thumbnailUrl: meta.thumbnailUrl || yt.thumbOf(id), addedAt: Date.now() });
+  // Search/playlist items carry no description: null, filled when first played.
+  const description = meta.description != null ? descriptionFor(id, meta.description) : null;
+  await db.upsertVideo({ ...meta, id, thumbnailUrl: meta.thumbnailUrl || yt.thumbOf(id), addedAt: Date.now(), description });
 }
 
 /** library_actions.dart addInput: videos, optional playlist, per-URL tags. */
@@ -122,7 +127,7 @@ const langOf = (trackId) => trackId.split(/[.-]/)[0];
  */
 async function pickTrack(videoId) {
   toast('Checking audio tracks…');
-  const r = await yt.resolve(videoId);
+  const r = await yt.resolve(sourceOf(videoId)); // a clip downloads its source's track
   if (r.audioTracks.length < 2) return undefined;
   const sel = yt.trackFor(r, (await db.getSetting('audioLanguage')) ?? '');
   const fd = await dialog(`<form method="dialog"><h2>Audio track</h2>
@@ -266,7 +271,7 @@ function videoRows(listName, videos, extra = () => '') {
     return `<li class="vrow">
       <img class="thumb" alt="" data-thumb="${esc(v.id)}" data-src="${esc(v.thumbnailUrl)}">
       <div class="meta"><div class="title" title="${esc(v.title)}">${esc(v.title)}</div>
-        <div class="muted">${esc(v.channel)} ${fmtDur(v.durationMs)}${kinds.map((k) => `<span class="badge ok">${k}</span>`).join('')}</div></div>
+        <div class="muted">${esc(v.channel)} ${fmtDur(v.durationMs)}${isClip(v.id) ? '<span class="badge" title="Cut from a YouTube video">clip</span>' : ''}${kinds.map((k) => `<span class="badge ok">${k}</span>`).join('')}</div></div>
       <div class="acts">
         <button class="icon" data-act="play" data-list="${listName}" data-i="${i}" title="Play" aria-label="Play">▶</button>
         ${listName === 'search' ? '' : `<button class="icon" data-act="addDialog" data-id="${esc(v.id)}" title="Playlists, tags, categories…" aria-label="Organise">＋</button>`}
@@ -381,6 +386,7 @@ async function downloadsView() {
       <div class="acts">
         ${d.status === 'done' ? `
           <button class="icon" data-act="play" data-list="dl" data-i="${i}" title="Play" aria-label="Play">▶</button>
+          <button class="icon" data-act="editDownload" data-id="${d.id}" title="Edit: split, keep parts, save" aria-label="Edit">✂</button>
           <button class="icon" data-act="exportDownload" data-id="${d.id}" title="Save to disk" aria-label="Save to disk">💾</button>
           <select data-change="expiry" data-id="${d.id}" aria-label="Auto-remove">${EXPIRY.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>` : ''}
         ${d.status === 'failed' ? `<button class="secondary" data-act="retryDownload" data-id="${d.id}">Retry</button>` : ''}
@@ -558,6 +564,7 @@ const ACT = {
   untagVideo: (d) => db.untagVideo(d.video, +d.id),
   deleteCategory: async (d) => { if (confirm('Delete this category everywhere?')) { await db.deleteCategory(+d.id); location.hash = '#library'; } },
   uncategorizeVideo: (d) => db.uncategorizeVideo(d.video, +d.id),
+  editDownload: async (d) => { player.element().pause(); await openEditor(await db.downloadById(+d.id), { toast, onSaved: player.reloadIfCurrent }); },
   exportDownload: async (d) => { const x = await db.downloadById(+d.id); await dl.exportToDisk(x, (await db.videoById(x.videoId))?.title); },
   retryDownload: async (d) => toast(`Retry: ${await dl.retry(await db.downloadById(+d.id))}`),
   deleteDownload: async (d) => {
@@ -608,6 +615,15 @@ const ACT = {
   // The track chosen in Now playing is the one downloaded — no second question.
   nDlAudio: async () => { const v = nowItem(); await ensureVideo(v.id, v); await enqueueMany('audio', [v.id], player.state.trackId ?? undefined); },
   nDlVideo: async () => { const v = nowItem(); await ensureVideo(v.id, v); await enqueueMany('video', [v.id], player.state.trackId ?? undefined); },
+  // The file being shown: video when the picture is on, else audio.
+  nEdit: async () => {
+    const id = nowItem().id;
+    const kinds = player.state.showVideo ? ['video', 'audio'] : ['audio', 'video'];
+    const d = (await db.doneDownload(id, kinds[0])) ?? (await db.doneDownload(id, kinds[1]));
+    if (!d) return toast('Download it first — the editor works on downloaded files');
+    player.element().pause();
+    await openEditor(d, { toast, onSaved: player.reloadIfCurrent });
+  },
 };
 
 const CHANGE = {
@@ -622,6 +638,7 @@ const CHANGE = {
   autoDays: (el) => db.setSetting('autoRemoveDays', Math.max(1, +el.value || 30)),
   pSleep: (el) => player.setSleepTimer(+el.value || null),
   nTrack: (el) => player.setTrack(el.value),
+  nDesc: (el) => db.setVideoDescription(el.dataset.id, el.value),
 };
 
 const SUBMIT = {
@@ -719,6 +736,8 @@ function renderPlayer() {
   $('#n-repeat').textContent = `Repeat: ${{ none: 'off', all: 'all', one: 'one' }[s.repeat]}`;
   $('#n-sleep').value = '';
   $('#n-sleep').options[0].textContent = s.sleepEnd ? `Sleep: ${new Date(s.sleepEnd).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Sleep: off';
+  show('#n-edit', s.hasLocal);
+  showDescription(item);
   show('#n-error', !!s.error);
   $('#n-error-text').textContent = s.error ?? '';
   const q = $('#queue');
@@ -730,6 +749,28 @@ function renderPlayer() {
       <button class="icon" data-act="qMove" data-i="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} title="Up" aria-label="Move up">↑</button>
       <button class="icon" data-act="qMove" data-i="${i}" data-dir="1" ${i === last ? 'disabled' : ''} title="Down" aria-label="Move down">↓</button></li>`).join('');
   }
+}
+
+/**
+ * Now playing › Description: loaded when the item changes (never while typing).
+ * A row with none yet gets YouTube's text, prefixed with the link; an item
+ * that isn't in the library (a search result) has no row and no field.
+ */
+async function showDescription(item) {
+  const ta = $('#n-desc');
+  if (ta.dataset.id === item.id) return;
+  ta.dataset.id = item.id;
+  const v = await db.videoById(item.id);
+  if (ta.dataset.id !== item.id) return;
+  show('#n-desc-wrap', !!v);
+  ta.value = v?.description ?? '';
+  if (!v || v.description != null || isClip(item.id)) return;
+  try {
+    const m = await yt.fetchMeta(item.id);
+    await db.fillDescription(item.id, descriptionFor(item.id, m.description));
+    const now = await db.videoById(item.id);
+    if (ta.dataset.id === item.id && document.activeElement !== ta) ta.value = now?.description ?? '';
+  } catch { /* offline or refused: next play tries again */ }
 }
 
 let seeking = false;
