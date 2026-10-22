@@ -246,6 +246,34 @@ await assert.rejects(fetchRanges({
   assert.equal(calls, 1);
 }
 
+// The network goes away (the Mac sleeps, Wi-Fi drops): fetch throws TypeError "Failed to fetch".
+// The download waits and resumes from the last byte instead of failing (it used to give up after
+// 3 immediate tries, and the whole queue drained into "failed").
+{
+  let down = 6;
+  const pauses = [];
+  const out = [];
+  const flaky = async (url, { headers }) => {
+    const [a, b] = headers.Range.match(/bytes=(\d+)-(\d+)/).slice(1).map(Number);
+    if (a >= 10 && down > 0) { down--; throw new TypeError(down % 2 ? 'Failed to fetch' : 'network error'); }
+    const part = BODY.slice(a, Math.min(b + 1, 25));
+    return { status: 206, headers: new Map([['content-range', `bytes ${a}-${a + part.length - 1}/25`]]),
+      body: new ReadableStream({ start(c) { c.enqueue(part); c.close(); } }) };
+  };
+  await fetchRanges({ url: async () => 'u', write: async (b) => { out.push(...b); }, onBytes: () => {}, chunk: 10,
+    fetchFn: flaky, pauseFn: async (ms) => { pauses.push(ms); } });
+  assert.deepEqual(out, [...BODY]);
+  assert.deepEqual(pauses, [2000, 4000, 8000, 16000, 32000, 60000], 'backs off, capped at a minute');
+  // …but not forever: offline long enough (~15 min of waiting), it reports a clear reason.
+  await assert.rejects(fetchRanges({ url: async () => 'u', write: async () => {}, onBytes: () => {}, chunk: 10,
+    fetchFn: async () => { throw new TypeError('Failed to fetch'); }, pauseFn: async () => {} }), /Network connection lost/);
+  // A bug is not a network outage: it fails as before, without waiting.
+  let waited = false;
+  await assert.rejects(fetchRanges({ url: async () => 'u', write: async () => {}, onBytes: () => {}, chunk: 10,
+    fetchFn: async () => null, pauseFn: async () => { waited = true; } }), TypeError);
+  assert.equal(waited, false);
+}
+
 // ---- unusedFiles: what Clear storage may delete ----
 {
   const { unusedFiles } = await import('./downloads.js');

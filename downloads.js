@@ -175,17 +175,37 @@ export async function enqueueVideo(videoId, { force = false, track } = {}) {
   return 'queued';
 }
 
+/** Wait ms (cancellable by signal); while the browser reports offline, keep waiting until it's back. */
+async function pause(ms, signal) {
+  const wait = (t) => new Promise((ok, no) => {
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', stop); ok(); }, t);
+    const stop = () => { clearTimeout(timer); no(signal.reason); };
+    signal?.addEventListener('abort', stop, { once: true });
+  });
+  await wait(ms);
+  while (globalThis.navigator?.onLine === false) await wait(5000);
+}
+// Chrome's fetch: "Failed to fetch" (no answer), "network error" (the connection dropped mid-body).
+const isNetworkError = (e) => e instanceof TypeError && /^(failed to fetch|network error)$/i.test(e.message);
+// ponytail: ~15 min of backed-off waiting per download before "Network connection lost"; offline time doesn't count.
+const NET_PATIENCE = 15 * 60000;
+
 /**
  * Download a stream in sequential CHUNK-sized ranges, appending via write().
  * A failed range resumes from the last byte written: two retries in a row,
  * a 403 re-resolves the URL with force, and a range that sends nothing for
- * idleMs is abandoned and retried. `signal` cancels at once. Returns the size.
+ * idleMs is abandoned and retried. No answer at all (fetch's TypeError
+ * "Failed to fetch": the Mac slept, Wi-Fi dropped) waits with back-off and
+ * resumes instead, so a queue doesn't drain into "failed" during an outage.
+ * `signal` cancels at once. Returns the size.
  */
-export async function fetchRanges({ url, write, onBytes, chunk = CHUNK, fetchFn = fetch, signal, idleMs = 30000 }) {
+export async function fetchRanges({ url, write, onBytes, chunk = CHUNK, fetchFn = fetch, signal, idleMs = 30000, pauseFn = pause }) {
   let got = 0;
   let total = null;
   let force = false;
   let fails = 0;
+  let netTries = 0;
+  let netWaited = 0;
   while (total == null || got < total) {
     signal?.throwIfAborted();
     const ac = new AbortController();
@@ -220,9 +240,18 @@ export async function fetchRanges({ url, write, onBytes, chunk = CHUNK, fetchFn 
         onBytes(got, total);
       }
       fails = 0;
+      netTries = 0;
+      netWaited = 0;
       if (!total || res.status === 200) break; // unknown size / whole file in one go
     } catch (e) {
       if (signal?.aborted) throw signal.reason;
+      if (isNetworkError(e)) { // no answer / connection dropped: wait for the network, don't spend a retry
+        if (netWaited >= NET_PATIENCE) throw new Error('Network connection lost. Press Retry when you are back online.');
+        const ms = Math.min(60000, 2000 * 2 ** netTries++);
+        netWaited += ms;
+        await pauseFn(ms, signal);
+        continue;
+      }
       if (++fails > 2) throw e;
       force = e.status === 403;
     } finally {

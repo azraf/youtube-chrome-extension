@@ -374,7 +374,10 @@ async function downloadsView() {
   const ds = await db.downloadsWithVideo();
   lists.dl = ds.map((d) => d.video);
   if (!ds.length) return '<section class="card"><h2>Downloads</h2><p class="muted">No downloads yet.</p></section>';
-  return `<section class="card"><h2>Downloads</h2><ul class="vlist">${ds.map((d, i) => `
+  const failed = ds.filter((d) => d.status === 'failed').length;
+  return `<section class="card"><h2>Downloads</h2>
+    ${failed > 1 ? `<div class="row"><button class="secondary" data-act="retryFailed">Retry all failed (${failed})</button></div>` : ''}
+    <ul class="vlist">${ds.map((d, i) => `
     <li class="vrow">
       <img class="thumb" alt="" data-thumb="${esc(d.videoId)}" data-src="${esc(d.video.thumbnailUrl)}">
       <div class="meta"><div class="title" title="${esc(d.video.title)}">${esc(d.video.title)}</div>
@@ -601,6 +604,14 @@ const ACT = {
   uncategorizeVideo: (d) => db.uncategorizeVideo(d.video, +d.id),
   editDownload: async (d) => { player.element().pause(); await openEditor(await db.downloadById(+d.id), { toast, onSaved: player.reloadIfCurrent }); },
   exportDownload: async (d) => { const x = await db.downloadById(+d.id); await dl.exportToDisk(x, (await db.videoById(x.videoId))?.title); },
+  retryFailed: async () => {
+    const failed = (await db.downloadsInStatus(['failed'])).sort((a, b) => a.createdAt - b.createdAt);
+    toast(`Retrying ${failed.length} downloads…`);
+    for (const [i, d] of failed.entries()) {
+      await dl.retry(d);
+      if (i < failed.length - 1) await sleep(2000); // every retry asks youtube.com afresh; a burst trips its bot check
+    }
+  },
   retryDownload: async (d) => toast(`Retry: ${await dl.retry(await db.downloadById(+d.id))}`),
   deleteDownload: async (d) => {
     if (!confirm(d.active ? 'Stop this download and remove it?' : 'Delete this download?')) return;

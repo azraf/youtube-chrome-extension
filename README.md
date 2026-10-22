@@ -92,7 +92,7 @@ This page shows progress, size and the audio track for each download. For each o
 - **✂** open it in the [editor](#editor)
 - **💾** save the file to disk
 - **Remove after…** delete it automatically after a number of days
-- **Cancel** or **🗑** delete it, and **Retry** a failed one
+- **Cancel** or **🗑** delete it, and **Retry** a failed one (or **Retry all failed** at the top)
 
 Downloads are stored inside the browser, not in your Downloads folder. To get a normal file, use 💾.
 
@@ -137,6 +137,7 @@ Search YouTube from inside the app. Results can be played, added (＋) or downlo
 ## Tips and troubleshooting
 
 - **A video won't play or download.** YouTube changes its systems from time to time. Click **Retry** or **Try 360p**. If it still fails, try again later, or update the extension.
+- **Downloads pause when the connection drops.** If your computer sleeps or the Wi-Fi goes, a running download waits and carries on from where it stopped once you're back online. After about 15 minutes without a connection it shows *Network connection lost*; press **Retry** (or **Retry all failed**).
 - **Downloads disappeared.** Clearing Chrome's site data for this extension, or uninstalling it, deletes the library and every download. Save important files to disk with 💾 first.
 - **Running out of space.** Turn on *Auto-remove downloads*, or use *Clear storage…*.
 
