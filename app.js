@@ -663,13 +663,28 @@ const ACT = {
   nDlAudio: async () => { const v = nowItem(); await ensureVideo(v.id, v); await enqueueMany('audio', [v.id], player.state.trackId ?? undefined); },
   nDlVideo: async () => { const v = nowItem(); await ensureVideo(v.id, v); await enqueueMany('video', [v.id], player.state.trackId ?? undefined); },
   // The file being shown: video when the picture is on, else audio.
+  // The file being shown: video when the picture is on, else audio. Not
+  // downloaded yet? Offer the download; the editor opens when it lands.
   nEdit: async () => {
-    const id = nowItem().id;
+    const v = nowItem();
     const kinds = player.state.showVideo ? ['video', 'audio'] : ['audio', 'video'];
-    const d = (await db.doneDownload(id, kinds[0])) ?? (await db.doneDownload(id, kinds[1]));
-    if (!d) return toast('Download it first — the editor works on downloaded files');
-    player.element().pause();
-    await openEditor(d, { toast, onSaved: player.reloadIfCurrent });
+    const d = (await db.doneDownload(v.id, kinds[0])) ?? (await db.doneDownload(v.id, kinds[1]));
+    if (d) {
+      player.element().pause();
+      return openEditor(d, { toast, onSaved: player.reloadIfCurrent });
+    }
+    const fd = await dialog(`<form method="dialog"><h2>Edit this video</h2>
+      <p>The editor cuts a downloaded file. Download it first; the editor opens by itself when the download finishes.</p>
+      <fieldset><legend>Download</legend>
+        <label><input type="radio" name="kind" value="video" ${kinds[0] === 'video' ? 'checked' : ''}> Video</label>
+        <label><input type="radio" name="kind" value="audio" ${kinds[0] === 'audio' ? 'checked' : ''}> Audio only</label>
+      </fieldset>${buttons('Download')}</form>`);
+    if (!fd) return;
+    const kind = fd.get('kind');
+    const since = Date.now();
+    await ensureVideo(v.id, v);
+    await enqueueMany(kind, [v.id], player.state.trackId ?? undefined);
+    pendingEdit = { id: v.id, kind, since };
   },
 };
 
@@ -783,7 +798,6 @@ function renderPlayer() {
   $('#n-repeat').textContent = `Repeat: ${{ none: 'off', all: 'all', one: 'one' }[s.repeat]}`;
   $('#n-sleep').value = '';
   $('#n-sleep').options[0].textContent = s.sleepEnd ? `Sleep: ${new Date(s.sleepEnd).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Sleep: off';
-  show('#n-edit', s.hasLocal);
   showDescription(item);
   show('#n-error', !!s.error);
   $('#n-error-text').textContent = s.error ?? '';
@@ -846,6 +860,21 @@ $('#n-seek').addEventListener('change', () => {
 document.addEventListener('fullscreenchange', () => { $('#media').controls = document.fullscreenElement === $('#media'); });
 
 db.changed.addEventListener('change', rerender);
+// ✂ on a video that wasn't downloaded: open the editor once its download lands.
+let pendingEdit = null;
+db.changed.addEventListener('change', guard(async () => {
+  const p = pendingEdit;
+  if (!p) return;
+  const d = await db.doneDownload(p.id, p.kind);
+  if (d) {
+    pendingEdit = null;
+    if ($('#dlg').open) return toast('Download finished: press ✂ to edit it');
+    player.element().pause();
+    await openEditor(d, { toast, onSaved: player.reloadIfCurrent });
+  } else if ((await db.downloadsOf(p.id)).some((x) => x.kind === p.kind && x.status === 'failed' && x.createdAt >= p.since)) {
+    pendingEdit = null; // the Downloads page shows why
+  }
+}));
 dl.ticks.addEventListener('tick', () => {
   for (const [id, p] of dl.progress) {
     const bar = document.getElementById(`p-${id}`);

@@ -78,7 +78,7 @@ Open a playlist to **Play all**, **Shuffle play**, **Download all audio / video*
 - **Audio track**: pick a dubbed language, if the video has one.
 - **Play live stream** appears on a downloaded video and plays YouTube's version instead of your file.
 - **＋ / ♪ / ⬇**: add the current video to the library, or download it.
-- **✂** (on a downloaded video) opens the [editor](#editor).
+- **✂** opens the [editor](#editor). If the video isn't downloaded yet, it offers to download it (video or audio only), and the editor opens by itself when the download finishes.
 - **Description**: open it under the title. It starts with the YouTube link followed by YouTube's own description, and you can change it to anything. Changes save when you click outside the box, and sync to the website and the phone app.
 - If playback fails, use **Retry** or **Try 360p**.
 
