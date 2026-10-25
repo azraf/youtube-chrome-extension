@@ -395,6 +395,9 @@ async function downloadsView() {
           <button class="icon" data-act="play" data-list="dl" data-i="${i}" title="Play" aria-label="Play">▶</button>
           <button class="icon" data-act="editDownload" data-id="${d.id}" title="Edit: split, keep parts, save" aria-label="Edit">✂</button>
           <button class="icon" data-act="exportDownload" data-id="${d.id}" title="Save to disk" aria-label="Save to disk">💾</button>
+          ${db.onServer(d) ? `<span class="badge ok" title="Synced: on your account, your other devices can get it">☁ synced</span>`
+            : d.localOnly ? `<span class="badge" title="Only in this browser: its server copy was deleted">only here</span>` : ''}
+          ${db.onServer(d) ? '' : `<button class="icon" data-act="syncDownload" data-id="${d.id}" title="Sync with server: upload it so your other devices can get it" aria-label="Sync with server">⇪</button>`}
           <select data-change="expiry" data-id="${d.id}" aria-label="Auto-remove">${EXPIRY.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>` : ''}
         ${d.status === 'failed' ? `<button class="secondary" data-act="retryDownload" data-id="${d.id}">Retry</button>` : ''}
         ${['queued', 'running', 'muxing'].includes(d.status)
@@ -613,10 +616,29 @@ const ACT = {
     }
   },
   retryDownload: async (d) => toast(`Retry: ${await dl.retry(await db.downloadById(+d.id))}`),
+  syncDownload: async (d) => {
+    const why = await sync.syncFile(await db.downloadById(+d.id));
+    toast(why ?? 'Uploading to your account…');
+    render();
+  },
   deleteDownload: async (d) => {
-    if (!confirm(d.active ? 'Stop this download and remove it?' : 'Delete this download?')) return;
     const row = await db.downloadById(+d.id);
-    if (row) await dl.deleteDownload(row);
+    if (!row) return;
+    if (db.onServer(row)) {
+      // A synced file: this browser only, or the server copy too (then the other devices ask about theirs).
+      const fd = await dialog(`<form method="dialog"><h2>Delete a synced file?</h2>
+        <p>This file is also on your account, so your other devices can get it. Delete it from this browser only, or from the server too?
+          Your other devices then ask whether to keep their copy.</p>
+        <fieldset><legend>Delete from</legend>
+          <label><input type="radio" name="where" value="here" checked> This browser only</label><br>
+          <label><input type="radio" name="where" value="both"> This browser and the server</label>
+        </fieldset>${buttons('Delete')}</form>`);
+      if (!fd) return;
+      if (fd.get('where') === 'both') {
+        try { await sync.deleteServerFile(row); } catch (e) { toast(`Couldn't delete the server copy, so nothing was deleted: ${e.message}`); return; }
+      }
+    } else if (!confirm(d.active ? 'Stop this download and remove it?' : 'Delete this download?')) return;
+    await dl.deleteDownload(row);
     render();
   },
   clearStorage: async () => {
@@ -895,12 +917,72 @@ dl.ticks.addEventListener('tick', () => {
   }
 });
 sync.prompts.addEventListener('prompt', guard(async (e) => {
-  const { playlistIds, missing } = e.detail;
-  const fd = await dialog(`<form method="dialog"><h2>Synced playlists</h2>
-    <p>${missing} videos in ${playlistIds.length} synced playlist${playlistIds.length > 1 ? 's' : ''} aren't downloaded here.</p>
-    <fieldset><legend>Download them as</legend>${kindRadios('audio').replace("Don't download", 'Later')}</fieldset>${buttons('OK')}</form>`);
-  const kind = fd?.get('kind');
-  if (kind && kind !== 'none') for (const id of playlistIds) await dl.downloadPlaylist(id, kind);
+  const { playlistIds, missing, files = [], deleted = [] } = e.detail;
+  if (missing) {
+    const fd = await dialog(`<form method="dialog"><h2>Synced playlists</h2>
+      <p>${missing} videos in ${playlistIds.length} synced playlist${playlistIds.length > 1 ? 's' : ''} aren't downloaded here.</p>
+      <fieldset><legend>Download them as</legend>${kindRadios('audio').replace("Don't download", 'Later')}</fieldset>${buttons('OK')}</form>`);
+    const kind = fd?.get('kind');
+    if (kind && kind !== 'none') for (const id of playlistIds) await dl.downloadPlaylist(id, kind);
+  }
+  if (deleted.length) {
+    // Server copies deleted on the web panel or another device: keep ours (local-only) or delete them too.
+    // Preview: thumbnail, kind, size and cut, and ▶ to play this browser's copy.
+    const cut = (d) => (d.segments ? d.segments.map(([a, b]) => `${fmtDur(a) || '0:00'}–${fmtDur(b)}`).join(', ') : 'whole video');
+    const list = (await Promise.all(deleted.map(async ({ d, title }) => {
+      const thumb = await dl.thumbUrl(d.videoId).catch(() => null);
+      return `<li class="row" style="gap:8px;align-items:center">
+        ${thumb ? `<img src="${thumb}" alt="" width="64" height="36" style="object-fit:cover;border-radius:4px">` : ''}
+        <span style="flex:1;min-width:0"><b>${esc(title)}</b><br><span class="muted">${d.kind === 'audio' ? 'Audio' : 'Video'}${d.fileSize ? ` · ${fmtBytes(d.fileSize)}` : ''} · ${cut(d)}</span></span>
+        <button type="button" class="icon" data-preview="${d.id}" title="Play this file" aria-label="Play this file">▶</button></li>`;
+    }))).join('');
+    const asked = dialog(`<form method="dialog"><h2>${deleted.length === 1 ? 'Server file deleted' : `${deleted.length} server files deleted`}</h2>
+      <p>The server copy was deleted on the web or on another device. Keep the file in this browser, or delete it here too? Tap ▶ to check which one it is.</p>
+      <ul style="list-style:none;padding:0">${list}</ul><div id="preview-slot"></div>
+      <fieldset><legend>In this browser</legend>
+        <label><input type="radio" name="keep" value="keep" checked> Keep it</label><br>
+        <label><input type="radio" name="keep" value="delete"> Delete it</label>
+      </fieldset>${buttons('OK')}</form>`);
+    let previewUrl = null;
+    for (const btn of $('#dlg').querySelectorAll('[data-preview]')) {
+      btn.onclick = async () => {
+        const d = deleted.find((x) => x.d.id === +btn.dataset.preview).d;
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        previewUrl = await dl.fileUrl(d);
+        $('#preview-slot').innerHTML = d.kind === 'video'
+          ? `<video src="${previewUrl}" controls autoplay style="width:100%;max-height:240px"></video>`
+          : `<audio src="${previewUrl}" controls autoplay style="width:100%"></audio>`;
+      };
+    }
+    const fd = await asked;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    if (fd) {
+      for (const { d } of deleted) fd.get('keep') === 'keep' ? await db.markLocalOnly(d.id) : await dl.deleteDownload(d);
+      render();
+    }
+  }
+  if (!files.length) return;
+  // Split/edited on the phone (or another browser): fetch the cut files.
+  const audio = files.filter((f) => f.kind === 'audio');
+  const mb = Math.ceil(files.reduce((n, f) => n + f.size, 0) / 1048576);
+  const fd = await dialog(`<form method="dialog"><h2>Edited on your other devices</h2>
+    <p>${files.length} edited file${files.length > 1 ? 's' : ''} (${audio.length} audio, ${files.length - audio.length} video, ${mb} MB) are ready.</p>
+    <fieldset><legend>Download</legend>
+      <label><input type="radio" name="which" value="all" checked> All</label>
+      ${audio.length && audio.length < files.length ? '<label><input type="radio" name="which" value="audio"> Audio only</label>' : ''}
+      <label><input type="radio" name="which" value="none"> Later</label>
+    </fieldset>${buttons('OK')}</form>`);
+  const which = fd?.get('which');
+  if (!which || which === 'none') return;
+  const pick = which === 'audio' ? audio : files;
+  const src = await dialog(`<form method="dialog"><h2>Download from</h2>
+    <fieldset><legend>Source</legend>
+      <label><input type="radio" name="src" value="server" checked> Your account (server): the exact file from your other device, ${Math.ceil(pick.reduce((n, f) => n + f.size, 0) / 1048576)} MB</label><br>
+      <label><input type="radio" name="src" value="youtube"> YouTube: your quality setting${pick.some((f) => f.segments) ? ', then cut to the same parts' : ''}</label>
+    </fieldset>${buttons('Download')}</form>`);
+  if (!src) return;
+  src.get('src') === 'youtube' ? await sync.fetchFromYoutube(pick) : await sync.fetchFiles(pick);
+  toast(`Queued ${pick.length} download(s)`);
 }));
 window.addEventListener('hashchange', render);
 window.addEventListener('beforeunload', (e) => {

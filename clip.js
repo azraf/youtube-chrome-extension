@@ -14,6 +14,30 @@ export const totalMs = (segs) => segs.reduce((n, [a, b]) => n + b - a, 0);
 export const descriptionFor = (id, text) => `https://youtu.be/${sourceOf(id)}${text?.trim() ? `\n\n${text.trim()}` : ''}`;
 
 /** Join touching/overlapping ranges, drop empty ones; input in play order. */
+// ---- edited files across devices (sync.js; mirrors clip.dart) ----
+
+/** A synced video row's `files` (edited files another device uploaded); absent = none. */
+export function remoteFiles(videoId, json) {
+  if (!Array.isArray(json)) return [];
+  // segments null = a whole (unedited) download synced as is.
+  return json.map((f) => ({ videoId, kind: f.kind, ext: f.ext, size: +f.size, segments: Array.isArray(f.segments) && f.segments.length ? f.segments : null, updatedAt: Date.parse(f.updatedAt) }));
+}
+
+/**
+ * Which of a video's server files to fetch. local: this device's finished
+ * files as { kind, segs (null = whole), pending (its own edit, not uploaded) }.
+ * A pending edit wins (its upload replaces the server's). Otherwise the newest
+ * server cut is the video's cut: fetch each server file holding it unless a
+ * local file of that kind already does.
+ */
+export function planFiles(local, remote) {
+  if (!remote.length || local.some((l) => l.pending)) return [];
+  const newest = remote.reduce((a, b) => (b.updatedAt > a.updatedAt ? b : a));
+  const target = JSON.stringify(newest.segments ?? null);
+  return remote.filter((f) => JSON.stringify(f.segments ?? null) === target
+    && !local.some((l) => l.kind === f.kind && JSON.stringify(l.segs ?? null) === target));
+}
+
 function merge(segs) {
   const out = [];
   for (const [a, b] of segs) {

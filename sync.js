@@ -1,16 +1,19 @@
 // Web sync with app.makewebsmart.com — port of sync_service.dart + core_backup's
-// SyncClient. Pull web edits, then push a full snapshot. Media never moves.
+// SyncClient. Pull web edits, then push a full snapshot. Plain downloads never
+// move; files the editor cut (Save, Save as) upload after the push and reach
+// the other devices through each video's `files` in the library.
 // ponytail: pull-then-push with a basedOn guard — a web edit landing between
 // the two is delayed one sync, never lost. Full-snapshot push, no delta.
 import * as db from './db.js';
-import { isClip, descriptionFor } from './clip.js';
+import * as dl from './downloads.js';
+import { isClip, descriptionFor, remoteFiles, planFiles } from './clip.js';
 
 export const BASE_URL = 'https://app.makewebsmart.com';
 const APP = 'youtube_personal';
 const MIN_INTERVAL = 2 * 60 * 1000;
 const KEYS = ['syncToken', 'syncEmail', 'syncSince', 'syncSeen', 'syncLastHash', 'syncLastAt', 'syncLastError'];
 
-/** Set by a pull that brought playlists whose videos aren't downloaded here. */
+/** Set by a pull that brought playlists whose videos aren't downloaded here, or files edited elsewhere. */
 export const prompts = new EventTarget();
 
 async function call(method, path, { token, body } = {}) {
@@ -53,12 +56,67 @@ export async function sync({ manual = false, fetchMeta = null } = {}) {
   try {
     await pull(token, fetchMeta);
     await push(token);
+    uploadDue(token); // background: a big file must not hold up the next sync
     await db.setSetting('syncLastAt', new Date().toISOString());
     await db.deleteSetting('syncLastError');
   } catch (e) {
     await db.setSetting('syncLastError', e.message ?? String(e));
   } finally {
     running = false;
+  }
+}
+
+/** "Delete here and on the server": remove the server copy of d's cut; already gone (404) is fine. */
+export async function deleteServerFile(d) {
+  const token = await db.getSetting('syncToken');
+  if (!token) throw new Error('Not connected to web sync');
+  const res = await fetch(`${BASE_URL}/api/v1/youtube/files/${encodeURIComponent(d.videoId)}/${d.kind}`, {
+    method: 'DELETE', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+  });
+  if (res.status === 401) throw new Error('Token rejected — connect again in Settings');
+  if (!res.ok && res.status !== 404) throw new Error(`Server error ${res.status}`);
+}
+
+/** "Sync with server" on a finished file the server doesn't have (a plain download, or one kept local). */
+export async function syncFile(d) {
+  const token = await db.getSetting('syncToken');
+  if (!token) return 'Connect web sync in Settings first';
+  await db.updateDownload(d.id, { shared: true, localOnly: false });
+  uploadDue(token);
+  return null;
+}
+
+/** The server's synced files for a video, as of the last pull. */
+export async function serverFilesOf(videoId) {
+  const all = JSON.parse((await db.getSetting('serverFiles')) ?? '{}');
+  return remoteFiles(videoId, all[videoId]);
+}
+
+/** Queue other devices' files from YouTube, cut to the same parts. */
+export async function fetchFromYoutube(files) {
+  for (const f of files) {
+    await (f.kind === 'audio' ? dl.enqueueAudio : dl.enqueueVideo)(f.videoId, { force: true, replace: true, cutTo: f.segments });
+  }
+}
+
+/** The prompt's "download them": queue the chosen server files.
+export async function fetchFiles(files) {
+  const token = await db.getSetting('syncToken');
+  if (!token) return;
+  for (const f of files) await dl.enqueueServerFile(f, { baseUrl: BASE_URL, token });
+}
+
+// ponytail: one upload at a time, whole file, no resume; a failed one goes again next sync.
+let uploading = false;
+async function uploadDue(token) {
+  if (uploading) return;
+  uploading = true;
+  try {
+    for (const d of await db.dueUploads()) {
+      try { await dl.uploadFile(d, { baseUrl: BASE_URL, token }); } catch (e) { console.info(e.message ?? e); }
+    }
+  } finally {
+    uploading = false;
   }
 }
 
@@ -85,6 +143,10 @@ async function pull(token, fetchMeta) {
   for (const c of fresh('categories', lib.categories)) await db.createOrGetCategory(c);
   for (const t of fresh('tags', lib.tags)) await db.createOrGetTag(t);
   for (const v of videos.values()) await upsertVideo(v);
+  const files = await serverFilesToFetch(videos.values(), sinceT);
+  await db.setSetting('serverFiles', JSON.stringify(Object.fromEntries([...videos.values()]
+    .filter((v) => Array.isArray(v.files) && v.files.length).map((v) => [v.id, v.files]))));
+  const deleted = await deletedOnServer(videos.values());
   for (const [vid, name] of fresh('videoTags', lib.videoTags, pairKey)) await db.tagVideo(vid, await db.createOrGetTag(name));
   for (const [vid, name] of fresh('videoCategories', lib.videoCategories, pairKey)) {
     await db.categorizeVideo(vid, await db.createOrGetCategory(name));
@@ -101,16 +163,57 @@ async function pull(token, fetchMeta) {
     categories: lib.categories, tags: lib.tags,
     videoTags: lib.videoTags.map(pairKey), videoCategories: lib.videoCategories.map(pairKey),
   }));
-  if (!applied.length) return;
-
-  if (fetchMeta) await fillMissingMeta(applied, fetchMeta);
   const missing = new Set();
-  for (const id of applied) {
-    for (const v of await db.playlistVideos(id)) {
-      if (!(await db.doneDownload(v.id, 'audio')) && !(await db.doneDownload(v.id, 'video'))) missing.add(v.id);
+  if (applied.length) {
+    if (fetchMeta) await fillMissingMeta(applied, fetchMeta);
+    for (const id of applied) {
+      for (const v of await db.playlistVideos(id)) {
+        if (!(await db.doneDownload(v.id, 'audio')) && !(await db.doneDownload(v.id, 'video'))) missing.add(v.id);
+      }
     }
   }
-  if (missing.size) prompts.dispatchEvent(new CustomEvent('prompt', { detail: { playlistIds: applied, missing: missing.size } }));
+  if (missing.size || files.length || deleted.length) {
+    prompts.dispatchEvent(new CustomEvent('prompt', { detail: { playlistIds: missing.size ? applied : [], missing: missing.size, files, deleted } }));
+  }
+}
+
+/** Synced files here whose server copy was deleted after they synced — asked until answered. */
+async function deletedOnServer(videos) {
+  const out = [];
+  for (const v of videos) {
+    if (!Array.isArray(v.deletedFiles) || !v.deletedFiles.length) continue;
+    for (const d of await db.downloadsOf(v.id)) {
+      if (d.status !== 'done' || d.syncedAt == null || d.localOnly) continue;
+      if (v.deletedFiles.some((g) => g.kind === d.kind && Date.parse(g.deletedAt) > d.syncedAt)) out.push({ d, title: v.title || v.id });
+    }
+  }
+  return out;
+}
+
+/** Server files (edited on another device) changed since the last pull that this device should offer — see planFiles. */
+async function serverFilesToFetch(videos, since) {
+  const out = [];
+  for (const v of videos) {
+    const remote = remoteFiles(v.id, v.files);
+    if (!remote.length) continue;
+    let rows = await db.downloadsOf(v.id);
+    const clipSegs = isClip(v.id) ? (await db.videoById(v.id))?.segments ?? null : null;
+    // A local file already holding the server's cut of its kind is on the server: mark it (no re-upload).
+    let marked = false;
+    for (const d of rows) {
+      if (d.status !== 'done' || d.syncedAt != null) continue;
+      const segs = JSON.stringify(d.segments ?? clipSegs ?? null);
+      if (remote.some((f) => f.kind === d.kind && JSON.stringify(f.segments ?? null) === segs)) { await db.markSynced(d.id, d.segments ?? null); marked = true; }
+    }
+    if (marked) rows = await db.downloadsOf(v.id);
+    if (since != null && !remote.some((f) => f.updatedAt > since)) continue; // offer only what changed since the last pull
+    const local = rows.filter((d) => d.status === 'done')
+      .map((d) => ({ kind: d.kind, segs: d.segments ?? clipSegs, pending: d.syncedAt == null && !d.localOnly && db.syncable(d) }));
+    for (const f of planFiles(local, remote)) {
+      if (!rows.some((d) => d.kind === f.kind && ['queued', 'running', 'muxing'].includes(d.status))) out.push(f); // not already on its way
+    }
+  }
+  return out;
 }
 
 /** Local playlist id, or null when the server row is a tombstone. */

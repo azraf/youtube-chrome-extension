@@ -113,16 +113,18 @@ const chooseTrack = async (r, track) => track ?? yt.trackFor(r, (await db.getSet
 const trackLabel = (r, id) => (r.audioTracks.length > 1 ? yt.audioFor(r, id).track.name : null);
 
 /** @returns 'queued' | 'skipped' | 'failed'. track: an audio track id (see yt.audioTracks). */
-export async function enqueueAudio(videoId, { force = false, track } = {}) {
-  if (isClip(videoId)) return enqueueClip(videoId, 'audio', { force, track });
-  if (await db.doneDownload(videoId, 'audio')) return 'skipped';
+/** replace: download again over an existing file (it stays until the new one is done). cutTo: cut the
+ * finished file to these source ranges — another device's edit, fetched fresh from YouTube. */
+export async function enqueueAudio(videoId, { force = false, track, replace = false, cutTo = null } = {}) {
+  if (isClip(videoId)) return enqueueClip(videoId, 'audio', { force, track, replace, cutTo });
+  if (!replace && await db.doneDownload(videoId, 'audio')) return 'skipped';
   const r = await resolveOrFail(videoId, 'audio', force);
   if (!r) return 'failed';
   const tid = await chooseTrack(r, track);
   const { audio } = yt.audioFor(r, tid);
   // .m4a even for the muxed fallback, so it never collides with the video download's <id>.mp4
   const name = `${videoId}.${audio.ext === 'mp4' ? 'm4a' : audio.ext}`;
-  const id = await db.insertDownload({ videoId, kind: 'audio', status: 'queued', createdAt: Date.now(), fileName: name, audioTrack: trackLabel(r, tid) });
+  const id = await db.insertDownload({ videoId, kind: 'audio', status: 'queued', createdAt: Date.now(), fileName: name, audioTrack: trackLabel(r, tid), cutTo });
   queue(id, async (signal) => {
     await fetchToOpfs(videoId, (s) => yt.audioFor(s, tid).audio.url, name, bytesOf(id), signal);
     await finalize(id, videoId, name);
@@ -130,15 +132,15 @@ export async function enqueueAudio(videoId, { force = false, track } = {}) {
   return 'queued';
 }
 
-export async function enqueueVideo(videoId, { force = false, track } = {}) {
-  if (isClip(videoId)) return enqueueClip(videoId, 'video', { force, track });
-  if (await db.doneDownload(videoId, 'video')) return 'skipped';
+export async function enqueueVideo(videoId, { force = false, track, replace = false, cutTo = null } = {}) {
+  if (isClip(videoId)) return enqueueClip(videoId, 'video', { force, track, replace, cutTo });
+  if (!replace && await db.doneDownload(videoId, 'video')) return 'skipped';
   const r = await resolveOrFail(videoId, 'video', force);
   if (!r) return 'failed';
   const tid = await chooseTrack(r, track);
   const mode = (await db.getSetting('videoQualityMode')) ?? 'standard';
   const name = `${videoId}.mp4`;
-  const row = { videoId, kind: 'video', status: 'queued', createdAt: Date.now(), fileName: name, audioTrack: trackLabel(r, tid) };
+  const row = { videoId, kind: 'video', status: 'queued', createdAt: Date.now(), fileName: name, audioTrack: trackLabel(r, tid), cutTo };
   const single = async () => {
     const id = await db.insertDownload({ ...row, quality: '360p' });
     queue(id, async (signal) => {
@@ -199,7 +201,7 @@ const NET_PATIENCE = 15 * 60000;
  * resumes instead, so a queue doesn't drain into "failed" during an outage.
  * `signal` cancels at once. Returns the size.
  */
-export async function fetchRanges({ url, write, onBytes, chunk = CHUNK, fetchFn = fetch, signal, idleMs = 30000, pauseFn = pause }) {
+export async function fetchRanges({ url, write, onBytes, chunk = CHUNK, fetchFn = fetch, signal, idleMs = 30000, pauseFn = pause, headers = {} }) {
   let got = 0;
   let total = null;
   let force = false;
@@ -221,7 +223,7 @@ export async function fetchRanges({ url, write, onBytes, chunk = CHUNK, fetchFn 
       force = false;
       if (!u) throw new Error('Stream no longer offered');
       arm();
-      const res = await fetchFn(u, { headers: { ...yt.STREAM_HEADERS, Range: `bytes=${got}-${got + chunk - 1}` }, credentials: 'omit', signal: ac.signal });
+      const res = await fetchFn(u, { headers: { ...yt.STREAM_HEADERS, ...headers, Range: `bytes=${got}-${got + chunk - 1}` }, credentials: 'omit', signal: ac.signal });
       // 200 = server ignored Range and sends the whole file; only usable from byte 0.
       if (res.status !== 206 && !(res.status === 200 && got === 0)) {
         res.body?.cancel();
@@ -465,7 +467,7 @@ export async function saveEdit(d, keep, fileMs, { onFraction, signal } = {}) {
   for (const [x, tmp] of staged) {
     await removeFile(x.fileName);
     await (await dir.getFileHandle(tmp)).move(x.fileName);
-    await db.updateDownload(x.id, { fileSize: (await fileOf(x.fileName)).size, segments: target });
+    await db.updateDownload(x.id, { fileSize: (await fileOf(x.fileName)).size, segments: target, syncedAt: null, localOnly: false }); // upload it
   }
   if (isClip(d.videoId)) await db.setClipSegments(d.videoId, target);
   await db.saveResumePosition(d.videoId, 0);
@@ -496,6 +498,7 @@ export async function saveEditAs(d, keep, fileMs, { title, playlistId = null, on
     quality: d.quality, audioTrack: d.audioTrack ?? null, segments: segs,
   });
   await finalize(id, clipId, name);
+  await db.updateDownload(id, { syncedAt: null }); // this device's edit: upload it
   if (playlistId) await db.addVideoToPlaylist(playlistId, clipId);
   return clipId;
 }
@@ -505,13 +508,13 @@ export async function saveEditAs(d, keep, fileMs, { title, playlistId = null, on
  * needed — the queue is FIFO, so the cut runs after it), then the clip's
  * ranges cut out of it — the same ranges as the clip's other file, if any.
  */
-async function enqueueClip(clipId, kind, opts) {
-  if (await db.doneDownload(clipId, kind)) return 'skipped';
+async function enqueueClip(clipId, kind, { replace = false, cutTo = null, ...opts } = {}) {
+  if (!replace && await db.doneDownload(clipId, kind)) return 'skipped';
   const failed = async (reason) => {
     await fail(await db.insertDownload({ videoId: clipId, kind, status: 'queued', createdAt: Date.now() }), reason);
     return 'failed';
   };
-  const segments = await timelineOf(clipId);
+  const segments = cutTo ?? await timelineOf(clipId);
   if (!segments?.length) return failed('This clip has no segments');
   const src = sourceOf(clipId);
   if (!(await db.videoById(src))) { // a clip synced from another device: its source isn't in this library
@@ -543,16 +546,80 @@ async function enqueueClip(clipId, kind, opts) {
 }
 
 async function finalize(id, videoId, name) {
-  // A new download of a video whose other file was edited: cut it to match.
-  const target = await timelineOf(videoId, id);
+  // A new download of a video whose other file was edited (or another device's cut): cut it to match.
   const d = await db.downloadById(id);
+  const target = d?.cutTo ?? await timelineOf(videoId, id);
   if (target && d && !same(await fileSegments({ ...d, fileName: name }), target)) {
     report(id, { phase: 'cutting', fraction: 0 });
     await conform(id, { ...d, fileName: name }, target, { onFraction: (fraction) => report(id, { phase: 'cutting', fraction }) });
   }
   const size = (await fileOf(name)).size;
   await saveThumb(videoId);
+  // syncedAt stays as it is: set only when the server holds this very cut (uploaded, fetched, or matched
+  // on pull). An edited file without it uploads at the next sync; a plain download never does.
   await db.updateDownload(id, { status: 'done', fileName: name, fileSize: size, completedAt: Date.now() });
+  // A re-download replaces the older finished file of this video and kind.
+  for (const x of await db.downloadsOf(videoId)) {
+    if (x.id === id || x.kind !== d?.kind || x.status !== 'done') continue;
+    if (x.fileName && x.fileName !== name) await removeFile(x.fileName);
+    await db.deleteDownloadRow(x.id);
+  }
+}
+
+// ---- edited files from the other devices (sync.js) ----
+
+/** The server takes edited files up to this size (its nginx route limit). */
+export const MAX_UPLOAD = 1 << 30;
+const filesUrl = (base, videoId, kind) => `${base}/api/v1/youtube/files/${encodeURIComponent(videoId)}/${kind}`;
+
+/** PUT this device's edited file d to the server as a raw body (streamed from OPFS). */
+export async function uploadFile(d, { baseUrl, token }) {
+  const file = await fileOf(d.fileName);
+  if (file.size > MAX_UPLOAD) return; // stays local
+  const segs = await fileSegments(d);
+  const q = new URLSearchParams({ ext: extOf(d.fileName), ...(segs && { segments: JSON.stringify(segs) }) });
+  const res = await fetch(`${filesUrl(baseUrl, d.videoId, d.kind)}?${q}`, {
+    method: 'PUT', body: file,
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': file.type || 'application/octet-stream' },
+  });
+  if (!res.ok) throw new Error(`Upload of ${d.fileName} failed (HTTP ${res.status})`);
+  await db.markSynced(d.id, d.segments ?? null);
+}
+
+/**
+ * Download an edited file another device uploaded. It replaces this
+ * device's file of that kind, and the other kind's file is cut to match
+ * (every file of a video holds the same moments) or failed if it can't be.
+ */
+export async function enqueueServerFile(f, { baseUrl, token }) {
+  const name = `${f.videoId}.${f.kind === 'audio' && f.ext === 'mp4' ? 'm4a' : f.ext}`;
+  const id = await db.insertDownload({ videoId: f.videoId, kind: f.kind, status: 'queued', createdAt: Date.now(), fileName: name, segments: f.segments, syncedAt: Date.now(), shared: true });
+  queue(id, async (signal) => {
+    const out = await (await (await media()).getFileHandle(name, { create: true })).createWritable();
+    try {
+      await fetchRanges({ url: async () => filesUrl(baseUrl, f.videoId, f.kind), headers: { Authorization: `Bearer ${token}` }, write: (b) => out.write(b), onBytes: bytesOf(id), signal });
+      await out.close();
+    } catch (e) {
+      await out.abort().catch(() => {});
+      throw e;
+    }
+    await saveThumb(f.videoId);
+    await db.updateDownload(id, { status: 'done', fileSize: (await fileOf(name)).size, completedAt: Date.now() });
+    for (const x of await db.downloadsOf(f.videoId)) {
+      if (x.id === id || x.status !== 'done') continue;
+      if (x.kind === f.kind) {
+        if (x.fileName && x.fileName !== name) await removeFile(x.fileName);
+        await db.deleteDownloadRow(x.id);
+      } else if (!same(await fileSegments(x), f.segments)) {
+        try {
+          await conform(id, x, f.segments);
+          await db.updateDownload(x.id, { syncedAt: null }); // this cut of the other kind isn't on the server yet
+        } catch {
+          await db.updateDownload(x.id, { status: 'failed', error: 'Edited on another device — download it again' });
+        }
+      }
+    }
+  });
 }
 
 /** Thumbnail next to the media so the library looks right offline. Best effort. */

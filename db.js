@@ -263,6 +263,20 @@ export const updateDownload = (id, p) => wr((s) => patch(s.downloads, id, p));
 export const downloadById = (id) => rd((s) => req(s.downloads.get(id)));
 export const setDownloadExpiry = (id, expiresAt) => updateDownload(id, { expiresAt });
 export const deleteDownloadRow = (id) => wr((s) => req(s.downloads.delete(id)));
+/** Finished files this device edited (a cut file or a clip) that the server doesn't have yet. */
+export const dueUploads = () => downloadsInStatus(['done']).then((ds) =>
+  ds.filter((d) => d.syncedAt == null && !d.localOnly && d.fileName && syncable(d)));
+/** Part of the synced files: an edited cut, or a download the user chose to sync (or got from the server). */
+export const syncable = (d) => !!(d.segments || String(d.videoId).includes('~') || d.shared);
+/** The server copy was deleted and the user keeps this one: it stays here only and never uploads again. */
+export const markLocalOnly = (id) => updateDownload(id, { localOnly: true, syncedAt: null });
+/** The server holds this file's cut (other devices can get it). */
+export const onServer = (d) => d.status === 'done' && d.syncedAt != null && !d.localOnly && syncable(d);
+/** The server holds this file as cut by segments — unless it was re-cut since that upload started. */
+export const markSynced = (id, segments) => wr(async (s) => {
+  const d = await req(s.downloads.get(id));
+  if (d && JSON.stringify(d.segments ?? null) === JSON.stringify(segments ?? null)) await req(s.downloads.put({ ...d, syncedAt: Date.now(), shared: true }));
+});
 export const downloadsInStatus = (statuses) => rd((s) => all(s.downloads)).then((ds) => ds.filter((d) => statuses.includes(d.status)));
 /** Newest first, each with its video. */
 export const downloadsWithVideo = () => rd(async (s) => {

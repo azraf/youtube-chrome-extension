@@ -91,8 +91,13 @@ This page shows progress, size and the audio track for each download. For each o
 - **▶** play it offline
 - **✂** open it in the [editor](#editor)
 - **💾** save the file to disk
+- **⇪ Sync with server** upload it to your account, so your phone and other browsers can get the same file (shown on files that aren't there yet)
 - **Remove after…** delete it automatically after a number of days
 - **Cancel** or **🗑** delete it, and **Retry** a failed one (or **Retry all failed** at the top)
+
+A **☁ synced** badge marks files that are on your account; **only here** marks files you kept after their server copy was deleted.
+
+Deleting a synced file asks: **This browser only**, or **This browser and the server**. If you delete it from the server too, your other devices ask whether to keep their own copy.
 
 Downloads are stored inside the browser, not in your Downloads folder. To get a normal file, use 💾.
 
@@ -113,7 +118,11 @@ Cuts are exact, so picture and sound always stay together:
 - **Video** is saved instantly when you only trim the end. Any other video cut is re-encoded so it starts on the exact frame. That takes a while in the browser, about real time or longer, and the progress bar shows how far it has got.
 - If a video has both an audio download and a video download, **Save** cuts both the same way, so both files always show the same part. A cancelled or failed save changes neither file. If you download the other kind later, it is cut to match.
 
-Clips sync to the website and the phone app with their parts. A device without the clip's file streams the original YouTube video and plays only those parts. Downloading a clip there downloads the original and cuts the clip out of it.
+Edited files follow you to your other devices. After **Save** or **Save as new**, the cut file uploads to your account on the website (files up to 1 GB), both for audio and for video. Any other download uploads when you click **⇪ Sync with server**. The phone app, and any other browser connected to the same account, shows **Edited on your other devices** at its next sync. Choose **Your account (server)** for the exact same file, or **YouTube** to download it in your own quality setting and cut the same parts here. On that device, a file of the other kind for the same video is cut to match, so audio and picture stay together. If you edited the same video on this device and it hasn't uploaded yet, your edit wins.
+
+If a synced file's server copy is deleted (on the website's **Synced files** page or on another device), this browser shows **Server file deleted** at its next sync. Each file is listed with its thumbnail, size and parts, and ▶ plays your copy so you can tell which one it is. **Keep it** leaves the file here only; **Delete it** removes it here too.
+
+Clips also sync to the website and the phone app with their parts. A device without the clip's file streams the original YouTube video and plays only those parts.
 
 ### Search
 
@@ -128,7 +137,7 @@ Search YouTube from inside the app. Results can be played, added (＋) or downlo
 - **Auto-remove downloads** after a number of days. A per-download *Remove after…* overrides this.
 - **Updates**: the installed version, **Check for updates**, the steps to update without losing anything, and **Reload extension**.
 - **Storage**: shows space used. **Clear storage…** removes leftovers from failed downloads and can also remove all your downloads.
-- **Web sync**: keeps playlists, tags and categories in step with the Personal Youtube phone app through app.makewebsmart.com. Files are never uploaded. To connect:
+- **Web sync**: keeps playlists, tags and categories in step with the Personal Youtube phone app through app.makewebsmart.com. Edited files, and files you choose to sync, also go through your account (see the [editor](#editor)). To connect:
   1. On the website, go to **Settings › Devices › Generate PIN** for Personal Youtube.
   2. Enter your email and the 8-digit PIN here.
 

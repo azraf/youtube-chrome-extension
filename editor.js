@@ -4,6 +4,7 @@
 // Lives in the app's one <dialog>; buttons use data-ed, not the app's data-act.
 import * as db from './db.js';
 import * as dl from './downloads.js';
+import * as sync from './sync.js';
 import { newEdit, addSplit, removeSplit, toggleKeep, segmentsOf, keptSegments, totalMs } from './clip.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -142,6 +143,7 @@ export async function openEditor(d, { toast, onSaved }) {
         await onSaved?.(d.videoId);
       }
       ac = null;
+      sync.sync({ manual: true }).catch(console.info); // send the edit to the other devices now
       dlg.close();
     } catch (e) {
       const cancelled = ac?.signal.aborted;

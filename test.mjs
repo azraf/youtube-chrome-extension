@@ -372,4 +372,39 @@ assert.ok(!isNewer('0.3.0', '0.3.0'));
 assert.ok(!isNewer('1.2.0+9', '1.2.0+1'), 'build number ignored');
 assert.ok(!isNewer('0.2.9', '0.3.0'), 'never offer a downgrade');
 
+// ---- planFiles / remoteFiles (mirrors clip_test.dart) ----
+{
+  const at = (min) => Date.UTC(2026, 9, 25, 10, min);
+  const f = (kind, segments, min) => ({ videoId: ID, kind, ext: kind === 'audio' ? 'm4a' : 'mp4', size: 1, segments, updatedAt: at(min) });
+  const cut = [[0, 1000]];
+  const remote = [f('audio', cut, 2), f('video', cut, 1)];
+  assert.deepEqual(clip.planFiles([{ kind: 'audio', segs: null, pending: false }], remote), remote, 'whole files here: fetch both');
+  assert.deepEqual(clip.planFiles([{ kind: 'audio', segs: cut, pending: false }], remote).map((x) => x.kind), ['video']);
+  assert.deepEqual(clip.planFiles([{ kind: 'audio', segs: [[0, 5]], pending: true }], remote), [], 'own edit wins');
+  assert.deepEqual(clip.planFiles([], [f('audio', cut, 5), f('video', [[0, 9]], 1)]).map((x) => x.kind), ['audio'], 'stale cut skipped');
+  assert.deepEqual(clip.planFiles([], []), []);
+  const parsed = clip.remoteFiles(ID, [
+    { kind: 'video', ext: 'mp4', size: 9, segments: [[0, 1000]], updatedAt: '2026-10-25T10:00:00Z' },
+    { kind: 'audio', ext: 'm4a', size: 9, segments: null, updatedAt: '2026-10-25T10:00:00Z' },
+  ]);
+  assert.deepEqual(parsed.map((x) => [x.kind, x.segments, x.updatedAt]), [['video', cut, Date.parse('2026-10-25T10:00:00Z')], ['audio', null, Date.parse('2026-10-25T10:00:00Z')]]);
+  assert.deepEqual(clip.remoteFiles(ID, undefined), []);
+  // A whole (unedited) download synced as is: segments null, equal to a local whole file.
+  const whole = clip.remoteFiles(ID, [{ kind: 'audio', ext: 'm4a', size: 9, segments: null, updatedAt: '2026-10-25T10:00:00Z' }]);
+  assert.equal(whole[0].segments, null);
+  assert.deepEqual(clip.planFiles([{ kind: 'audio', segs: null, pending: false }], whole), []);
+  assert.deepEqual(clip.planFiles([], whole), whole);
+}
+
+// ---- fetchRanges carries extra headers (the server's Authorization) ----
+{
+  const auth = [];
+  const one = async (_u, { headers }) => {
+    auth.push(headers.Authorization);
+    return { status: 206, body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(3)); c.close(); } }), headers: new Map([['content-range', 'bytes 0-2/3']]) };
+  };
+  assert.equal(await fetchRanges({ url: async () => 'u', headers: { Authorization: 'Bearer t' }, write: async () => {}, onBytes: () => {}, fetchFn: one }), 3);
+  assert.deepEqual(auth, ['Bearer t']);
+}
+
 console.log('test.mjs: all checks passed');
