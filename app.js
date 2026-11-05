@@ -995,13 +995,19 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // YouTube 403s its player API for `Origin: chrome-extension://…` (Risk 1); present
-// this extension's own requests as youtube.com. The User-Agent is never touched.
+// this extension's own requests as youtube.com. The User-Agent is Chrome's own,
+// except on the TV client's player request (yt.TV_PLAYER), which YouTube
+// refuses without the TV's.
 await chrome.declarativeNetRequest.updateSessionRules({
-  removeRuleIds: [1],
+  removeRuleIds: [1, 2],
   addRules: [{
     id: 1, priority: 1,
     action: { type: 'modifyHeaders', requestHeaders: [{ header: 'origin', operation: 'set', value: 'https://www.youtube.com' }] },
     condition: { requestDomains: ['youtube.com', 'googlevideo.com'], initiatorDomains: [chrome.runtime.id], resourceTypes: ['xmlhttprequest', 'media', 'other'] },
+  }, {
+    id: 2, priority: 1,
+    action: { type: 'modifyHeaders', requestHeaders: [{ header: 'user-agent', operation: 'set', value: yt.TV_UA }] },
+    condition: { urlFilter: `|${yt.TV_PLAYER}|`, initiatorDomains: [chrome.runtime.id], resourceTypes: ['xmlhttprequest'] },
   }],
 });
 navigator.storage.persist();

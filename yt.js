@@ -1,8 +1,8 @@
 // YouTube innertube access — port of apps/youtube_personal/lib/services/yt_gateway.dart.
 // Every request carries Chrome's own User-Agent (no UA faking) and never the
 // user's YouTube cookies (credentials:'omit').
-// ponytail: anonymous only — no sign-in/TV client; if YouTube bot-checks all
-// three clients from this IP there is no fallback.
+// ponytail: anonymous only — no sign-in; if YouTube bot-checks every
+// client from this IP there is no fallback.
 
 const YT = 'https://www.youtube.com';
 const PLAYER = `${YT}/youtubei/v1/player?prettyPrint=false`;
@@ -13,12 +13,22 @@ const PLAYER = `${YT}/youtubei/v1/player?prettyPrint=false`;
 export const STREAM_HEADERS = { Accept: '*/*', 'Accept-Language': 'en-US,en;q=0.9', Range: 'bytes=0-' };
 
 const LOCALE = { hl: 'en', timeZone: 'UTC', utcOffsetMinutes: 0 };
+// YouTube answers the TV client only with the TV's User-Agent ("The page needs
+// to be reloaded" otherwise). fetch can't set it, so TV player requests go to
+// TV_PLAYER and app.js's session rule 2 sets the header for that URL alone.
+export const TV_UA = 'Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1';
+export const TV_PLAYER = `${PLAYER}&pyt=tv`;
 // The in-body userAgent is part of the visionOS client identity, not an HTTP header.
 const VISION_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15';
 const CLIENTS = [
   { header: '101', visitor: true, client: { clientName: 'VISIONOS', clientVersion: '1.02', deviceMake: 'Apple',
     deviceModel: 'RealityDevice17,1', userAgent: VISION_UA, osName: 'visionOS', osVersion: '26.5.23O471' } },
+  // yt-dlp's tv_samsung: serves Made-for-Kids videos, which visionOS and the
+  // app clients refuse ("This video is not available" / a 3 MB preview). Its
+  // URLs need YouTube's player JS (n/sig) — solve() — and a warm-up (warm()).
+  { header: '7', visitor: true, cipher: true, client: { clientName: 'TVHTML5', clientVersion: '5.20260707',
+    deviceMake: 'Samsung', deviceModel: 'UKS9800', osName: 'Tizen', osVersion: '2.4.0', userAgent: TV_UA } },
   { header: 'ANDROID_VR', client: { clientName: 'ANDROID_VR', clientVersion: '1.56.21', deviceModel: 'Quest 3',
     osVersion: '12', osName: 'Android', androidSdkVersion: '32' } },
   { header: 'ANDROID', client: { clientName: 'ANDROID', clientVersion: '20.10.38',
@@ -235,10 +245,94 @@ async function visitorId() {
   return (visitor = JSON.parse((await res.text()).replace(/^\)\]\}'/, ''))[0][2][0][0][13]);
 }
 
+let js = null;
+/** The current player JS (yt-dlp's "main" variant) and its signatureTimestamp. */
+async function playerJs() {
+  if (js) return js;
+  const page = await (await fetch(`${YT}/iframe_api`, { credentials: 'omit' })).text();
+  const id = page.match(/player\\?\/([0-9a-fA-F]{8})\\?\//)?.[1];
+  if (!id) throw new Error('No YouTube player version');
+  const url = `${YT}/s/player/${id}/player_ias.vflset/en_US/base.js`;
+  const res = await fetch(url, { credentials: 'omit' });
+  if (!res.ok) throw new Error(`player JS HTTP ${res.status}`);
+  const text = await res.text();
+  const sts = +text.match(/signatureTimestamp[=:](\d+)/)?.[1];
+  if (!sts) throw new Error('No signatureTimestamp in player JS');
+  return (js = { url, text, sts });
+}
+
+// yt-dlp's EJS solver runs in the sandboxed solver.html (it evals the player
+// JS, which this page's CSP forbids). A fresh frame per call: the player JS can
+// navigate its frame away once it has run. Only app.html resolves streams.
+const prepped = new Map(); // player url → the solver's preprocessed player
+async function solve(p, requests) {
+  const f = Object.assign(document.createElement('iframe'), { src: 'solver.html', hidden: true });
+  try {
+    const win = await new Promise((ok) => { f.onload = () => ok(f.contentWindow); document.body.append(f); });
+    const pre = prepped.get(p.url);
+    const input = pre ? { type: 'preprocessed', preprocessed_player: pre, requests }
+      : { type: 'player', player: p.text, requests, output_preprocessed: true };
+    const r = await new Promise((ok, fail) => {
+      const done = (err, res) => { clearTimeout(t); removeEventListener('message', on); err ? fail(new Error(`YouTube player JS: ${err}`)) : ok(res); };
+      const on = (e) => { if (e.source === win) done(e.data?.error, e.data?.result); };
+      const t = setTimeout(() => done('solver timed out'), 30000);
+      addEventListener('message', on);
+      win.postMessage(input, '*');
+    });
+    if (r.preprocessed_player) prepped.set(p.url, r.preprocessed_player);
+    return Object.assign({}, ...r.responses.map((x) => (x.type === 'result' ? x.data : {})));
+  } finally {
+    f.remove();
+  }
+}
+
+/** Fill in each format's playable url: decipher `s` (signatureCipher) and `n`. */
+async function decipher(pr) {
+  const fs = [...(pr.streamingData?.formats ?? []), ...(pr.streamingData?.adaptiveFormats ?? [])];
+  for (const f of fs) {
+    if (!f.signatureCipher) continue;
+    const q = new URLSearchParams(f.signatureCipher);
+    Object.assign(f, { url: q.get('url'), s: q.get('s'), sp: q.get('sp') || 'signature' });
+  }
+  const sig = [...new Set(fs.map((f) => f.s).filter(Boolean))];
+  const n = [...new Set(fs.map((f) => f.url && new URL(f.url).searchParams.get('n')).filter(Boolean))];
+  if (!sig.length && !n.length) return pr;
+  const out = await solve(await playerJs(), [
+    ...(sig.length ? [{ type: 'sig', challenges: sig }] : []),
+    ...(n.length ? [{ type: 'n', challenges: n }] : []),
+  ]);
+  for (const f of fs) {
+    if (!f.url) continue;
+    const u = new URL(f.url);
+    if (f.s) {
+      if (!out[f.s]) { f.url = null; continue; }
+      u.searchParams.set(f.sp, out[f.s]);
+    }
+    const nn = out[u.searchParams.get('n')];
+    if (nn) u.searchParams.set('n', nn);
+    f.url = u.toString();
+  }
+  return pr;
+}
+
+/** googlevideo 403s a fresh TV-client URL for its first ~4 s (measured
+ *  2026-11-05: 403 to 3.0 s, 206 from 4.1 s) — wait it out, at most 6 s. */
+async function warm(url) {
+  const until = Date.now() + 6000;
+  for (;;) {
+    const res = await fetch(url, { headers: { ...STREAM_HEADERS, Range: 'bytes=0-0' }, credentials: 'omit' });
+    res.body?.cancel();
+    if (res.status !== 403 || Date.now() > until) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
 async function player(videoId, c) {
   const vd = c.visitor ? await visitorId() : null;
-  return postJson(PLAYER,
-    { context: { client: { ...c.client, ...LOCALE, ...(vd && { visitorData: vd }) } }, videoId, contentCheckOk: true, racyCheckOk: true },
+  const sts = c.cipher ? (await playerJs()).sts : null;
+  return postJson(c.cipher ? TV_PLAYER : PLAYER,
+    { context: { client: { ...c.client, ...LOCALE, ...(vd && { visitorData: vd }) } }, videoId, contentCheckOk: true, racyCheckOk: true,
+      ...(sts && { playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS', signatureTimestamp: sts } } }) },
     { 'X-Youtube-Client-Name': c.header, 'X-Youtube-Client-Version': c.client.clientVersion, ...(vd && { 'X-Goog-Visitor-Id': vd }) });
 }
 
@@ -260,7 +354,10 @@ export async function resolve(videoId, { force = false } = {}) {
   let last;
   for (const c of CLIENTS) {
     try {
-      const r = pickStreams(await player(videoId, c), videoId);
+      let pr = await player(videoId, c);
+      if (c.cipher) pr = await decipher(pr);
+      const r = pickStreams(pr, videoId);
+      if (c.cipher) await warm(r.audio.url);
       if (await previewLimited(r.audio.url, r.audio.size)) {
         last = new Error(`${c.client.clientName} is preview-limited`);
         continue;
@@ -270,7 +367,9 @@ export async function resolve(videoId, { force = false } = {}) {
       return r;
     } catch (e) {
       last = e;
+      console.debug(`yt: ${c.client.clientName} failed for ${videoId}:`, e.message);
       if (c.visitor) visitor = null; // a bot-checked visitor stays bot-checked
+      if (c.cipher) js = null; // a new player version may have rolled out
     }
   }
   if (last?.message === BOT_CHECK) throw last;
